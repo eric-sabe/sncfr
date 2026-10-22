@@ -27,7 +27,7 @@
   - Complete CLI subcommand definitions and TTY-aware output/error contracts (`0`–`7` exit codes).
 - [x] **[#2 — M1.2: Implement profile configuration (`config.toml`), env overrides, and local cache manager](https://github.com/eric-sabe/sncfr/issues/2)**
   - Load `~/.config/sncfr/config.toml` (profiles, `read_only`, saved views) + `SNCFR_*` env overrides + `~/.cache/sncfr/<instance>/` TTL cache manager.
-- [ ] **[#3 — M1.3: Implement compile-time `ReadOnlyClient` vs. `MutatingClient` (`WritePermit`) safety boundary](https://github.com/eric-sabe/sncfr/issues/3)**
+- [x] **[#3 — M1.3: Implement compile-time `ReadOnlyClient` vs. `MutatingClient` (`WritePermit`) safety boundary](https://github.com/eric-sabe/sncfr/issues/3)**
   - Enforce `ReadOnlyClient` (`GET` / `HEAD` / verified `GET`-only `/api/now/batch`) vs. `MutatingClient` (`WritePermit`), with hard-lock support (`SNCFR_READ_ONLY=1` / `read_only = true`) and zero `DELETE` methods.
 - [ ] **[#4 — M1.4: Implement ServiceNow encoded query builder and UI URL parser (`--from-url`)](https://github.com/eric-sabe/sncfr/issues/4)**
   - Typed `EncodedQuery` builder, relative duration translator (`4h`, `7d`), and parser for classic & Next Experience ServiceNow browser URLs.

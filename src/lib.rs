@@ -1,41 +1,28 @@
 pub mod cache;
 pub mod cli;
+pub mod client;
 pub mod config;
 pub mod error;
 pub mod output;
 
 use crate::cli::Cli;
+use crate::client::WritePermit;
 use crate::config::ResolvedProfile;
 use crate::error::SncfrError;
 use crate::output::ResolvedOutputFormat;
 
-/// Validates top-level CLI invariants (such as the hard read-only lock when `--write` is passed,
-/// including profile-level `read_only = true` when a profile is provided) and resolves the concrete
-/// output format for the invocation.
+/// Validates top-level CLI invariants (including issuing/verifying [`WritePermit`] eligibility
+/// when `--write` is passed) and resolves the concrete output format for the invocation.
 pub fn validate_invocation(
     cli: &Cli,
     profile: Option<&ResolvedProfile>,
     is_tty: bool,
-) -> Result<ResolvedOutputFormat, SncfrError> {
-    if cli.command.requests_write() {
-        if cli.read_only {
-            return Err(SncfrError::ReadOnlyLocked {
-                reason: "`--read-only` / `SNCFR_READ_ONLY` is active while `--write` was requested"
-                    .to_string(),
-            });
-        }
-        if let Some(prof) = profile
-            && let Some(reason) = &prof.read_only_lock_reason
-        {
-            return Err(SncfrError::ReadOnlyLocked {
-                reason: reason.clone(),
-            });
-        }
-    }
-
-    Ok(cli
+) -> Result<(ResolvedOutputFormat, Option<WritePermit>), SncfrError> {
+    let permit = WritePermit::issue(cli, profile)?;
+    let fmt = cli
         .effective_output()
-        .resolve_with_tty(cli.command.output_shape(), is_tty))
+        .resolve_with_tty(cli.command.output_shape(), is_tty);
+    Ok((fmt, permit))
 }
 
 #[cfg(test)]
@@ -92,8 +79,9 @@ mod tests {
         let cli = Cli::try_parse_from(["sncfr", "--read-only", "comment", "INC0010042", "Testing"])
             .expect("parse cli");
 
-        let fmt =
+        let (fmt, permit) =
             validate_invocation(&cli, None, false).expect("dry-run is allowed in read-only mode");
         assert_eq!(fmt, ResolvedOutputFormat::Md);
+        assert!(permit.is_none());
     }
 }

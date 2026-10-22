@@ -44,14 +44,14 @@ async fn main() -> ExitCode {
     };
 
     let resolved_profile = config.resolve_profile(&cli).ok();
-    let resolved_output = match validate_invocation(&cli, resolved_profile.as_ref(), is_stdout_tty)
-    {
-        Ok(fmt) => fmt,
-        Err(err) => {
-            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-            return err.exit_code();
-        }
-    };
+    let (resolved_output, _write_permit) =
+        match validate_invocation(&cli, resolved_profile.as_ref(), is_stdout_tty) {
+            Ok(res) => res,
+            Err(err) => {
+                eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                return err.exit_code();
+            }
+        };
 
     if let Commands::Auth(AuthCommands::Profiles) = &cli.command {
         render_profiles(&config, resolved_output);
