@@ -1,7 +1,8 @@
 use clap::Parser;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use sncfr::auth::{
-    AuthImportSummary, AuthLogoutSummary, CredentialStore, execute_auth_import, execute_auth_logout,
+    AuthImportSummary, AuthLoginSummary, AuthLogoutSummary, CredentialStore, execute_auth_import,
+    execute_auth_login, execute_auth_logout,
 };
 use sncfr::cli::{AuthCommands, Cli, Commands};
 use sncfr::config::AppConfig;
@@ -61,6 +62,19 @@ async fn main() -> ExitCode {
             render_profiles(&config, resolved_output);
             return ExitCode::SUCCESS;
         }
+        Commands::Auth(AuthCommands::Login(args)) => {
+            let store = CredentialStore::default_store();
+            match execute_auth_login(&cli, &mut config, args, &store).await {
+                Ok(summary) => {
+                    render_auth_login(&summary, resolved_output);
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
         Commands::Auth(AuthCommands::Import(args)) => {
             let store = CredentialStore::default_store();
             match execute_auth_import(&cli, &mut config, args, &store).await {
@@ -98,6 +112,27 @@ async fn main() -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+fn render_auth_login(summary: &AuthLoginSummary, format: ResolvedOutputFormat) {
+    match format {
+        ResolvedOutputFormat::Json => {
+            if let Ok(json) = serde_json::to_string_pretty(summary) {
+                println!("{json}");
+            }
+        }
+        ResolvedOutputFormat::Yaml => {
+            if let Ok(yaml) = serde_yaml::to_string(summary) {
+                print!("{yaml}");
+            }
+        }
+        _ => {
+            println!(
+                "Authenticated via Corporate SSO for profile '{}' ({}) [browser: {}]",
+                summary.profile, summary.instance_url, summary.browser_executable
+            );
+        }
+    }
 }
 
 fn render_auth_import(summary: &AuthImportSummary, format: ResolvedOutputFormat) {

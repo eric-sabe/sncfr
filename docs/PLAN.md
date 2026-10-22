@@ -38,7 +38,7 @@
 
 - [x] **[#5 — M2.1: Implement OS Keychain (`keyring`) session store and `sncfr auth import` / token fallbacks](https://github.com/eric-sabe/sncfr/issues/5)**
   - OS Keychain session bundle storage (`cookies` + `g_ck` token) and headless `sncfr auth import` (DevTools "Copy as cURL" / raw headers) + `api-key`/`basic`/`oauth` support.
-- [ ] **[#6 — M2.2: Implement CDP-driven isolated managed browser login (`sncfr auth login`) & expiry handler](https://github.com/eric-sabe/sncfr/issues/6)**
+- [x] **[#6 — M2.2: Implement CDP-driven isolated managed browser login (`sncfr auth login`) & expiry handler](https://github.com/eric-sabe/sncfr/issues/6)**
   - Discover managed Chromium browser, launch isolated `--app` window with CDP, extract `window.g_ck` and domain cookies upon login, and handle `401` expiry context-awarely (TTY vs. agent).
 - [ ] **[#7 — M2.3: Implement `sncfr auth status` and `sncfr doctor` capability probe (`@me` and ACL matrix)](https://github.com/eric-sabe/sncfr/issues/7)**
   - Resolve and cache `@me` user/group identity (`identity.json`) and probe read access across core tables and `/api/now/batch`.

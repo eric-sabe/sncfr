@@ -1,16 +1,22 @@
-use crate::cli::{AuthImportArgs, Cli};
-use crate::client::ClientAuth;
+use crate::cli::{AuthImportArgs, AuthLoginArgs, Cli};
+use crate::client::{ClientAuth, ReadOnlyClient};
 use crate::config::{
     AppConfig, AuthMethod, ResolvedProfile, default_config_path, normalize_instance_url,
 };
 use crate::error::SncfrError;
 use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{COOKIE, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
 const KEYRING_SERVICE: &str = "sncfr";
@@ -771,6 +777,491 @@ pub fn execute_auth_logout(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthLoginSummary {
+    pub profile: String,
+    pub instance_url: String,
+    pub instance_key: String,
+    pub browser_executable: String,
+    pub profile_dir: String,
+    pub has_user_token: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CdpTarget {
+    #[serde(rename = "type", default)]
+    target_type: String,
+    #[serde(default)]
+    url: String,
+    #[serde(rename = "webSocketDebuggerUrl")]
+    web_socket_debugger_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CdpCookie {
+    name: String,
+    value: String,
+    #[serde(default)]
+    domain: String,
+}
+
+/// Discovers the user's managed Chromium-based browser executable (Chrome, Edge, Brave, Arc, Chromium).
+pub fn discover_managed_browser(explicit: Option<&Path>) -> Result<PathBuf, SncfrError> {
+    if let Some(path) = explicit {
+        if path.exists() {
+            return Ok(path.to_path_buf());
+        }
+        return Err(SncfrError::InvalidArgs {
+            message: format!("Specified browser executable '{}' does not exist", path.display()),
+            remediation: Some(
+                "Pass a valid path to `--browser` or use `sncfr auth import` in headless environments."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if let Ok(env_browser) = std::env::var("SNCFR_BROWSER")
+        && !env_browser.trim().is_empty()
+    {
+        let p = PathBuf::from(env_browser.trim());
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.extend([
+            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            PathBuf::from("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+            PathBuf::from("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+            PathBuf::from("/Applications/Arc.app/Contents/MacOS/Arc"),
+            PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ]);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for bin in [
+            "google-chrome",
+            "google-chrome-stable",
+            "microsoft-edge",
+            "microsoft-edge-stable",
+            "brave-browser",
+            "chromium",
+            "chromium-browser",
+        ] {
+            for prefix in ["/usr/bin", "/usr/local/bin", "/snap/bin"] {
+                candidates.push(PathBuf::from(prefix).join(bin));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for env_key in ["ProgramFiles", "ProgramFiles(x86)", "LocalAppData"] {
+            if let Ok(base) = std::env::var(env_key) {
+                candidates.push(PathBuf::from(&base).join(r"Google\Chrome\Application\chrome.exe"));
+                candidates
+                    .push(PathBuf::from(&base).join(r"Microsoft\Edge\Application\msedge.exe"));
+                candidates.push(
+                    PathBuf::from(&base).join(r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+                );
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(SncfrError::InvalidArgs {
+        message: "Could not locate a managed Chromium browser (Chrome, Edge, Brave, Arc) on this system"
+            .to_string(),
+        remediation: Some(
+            "Pass `--browser /path/to/chrome` or use `sncfr auth import` to import a session from any browser."
+                .to_string(),
+        ),
+    })
+}
+
+/// Returns the isolated browser profile directory (`~/.local/share/sncfr/browser-profile/<instance_key>`).
+pub fn browser_profile_dir(instance_key: &str) -> Result<PathBuf, SncfrError> {
+    if let Ok(custom) = std::env::var("SNCFR_BROWSER_PROFILE_DIR")
+        && !custom.trim().is_empty()
+    {
+        return Ok(PathBuf::from(custom).join(instance_key));
+    }
+
+    let base_dirs = directories::BaseDirs::new().ok_or_else(|| SncfrError::InvalidArgs {
+        message: "Unable to determine user home directory for isolated browser profile".to_string(),
+        remediation: Some("Set `SNCFR_BROWSER_PROFILE_DIR` explicitly.".to_string()),
+    })?;
+
+    Ok(base_dirs
+        .home_dir()
+        .join(".local")
+        .join("share")
+        .join("sncfr")
+        .join("browser-profile")
+        .join(instance_key))
+}
+
+fn pick_ephemeral_port() -> Result<u16, SncfrError> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| SncfrError::NetworkOrInstance {
+        message: format!("Failed to bind local loopback port for CDP: {e}"),
+        status: None,
+        remediation: None,
+    })?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| SncfrError::NetworkOrInstance {
+            message: format!("Failed to inspect local loopback port: {e}"),
+            status: None,
+            remediation: None,
+        })?
+        .port();
+    Ok(port)
+}
+
+/// Polls a local CDP HTTP/WebSocket endpoint until a valid ServiceNow session (`Cookie` + `window.g_ck`)
+/// is active on `instance_url`, then closes the browser via `Browser.close` and returns `(cookie, user_token)`.
+pub async fn capture_session_via_cdp(
+    cdp_port: u16,
+    instance_url: &Url,
+    timeout: Duration,
+) -> Result<(String, Option<String>), SncfrError> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| SncfrError::NetworkOrInstance {
+            message: format!("Failed to construct CDP HTTP client: {e}"),
+            status: None,
+            remediation: None,
+        })?;
+
+    let list_url = format!("http://127.0.0.1:{cdp_port}/json/list");
+    let target_host = instance_url.host_str().unwrap_or_default().to_lowercase();
+    let deadline = Instant::now() + timeout;
+
+    while Instant::now() < deadline {
+        if let Ok(resp) = http.get(&list_url).send().await
+            && resp.status().is_success()
+            && let Ok(targets) = resp.json::<Vec<CdpTarget>>().await
+        {
+            for target in targets {
+                if target.target_type != "page" {
+                    continue;
+                }
+                let Some(ws_url) = target.web_socket_debugger_url.as_deref() else {
+                    continue;
+                };
+                // Only inspect pages once navigation has landed on (or returned to) the ServiceNow instance host
+                let is_on_instance = Url::parse(&target.url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_lowercase))
+                    .is_some_and(|h| h == target_host);
+                if !is_on_instance {
+                    continue;
+                }
+
+                if let Ok(Some((cookie, g_ck))) =
+                    probe_cdp_page_session(ws_url, instance_url, &target_host).await
+                {
+                    return Ok((cookie, Some(g_ck)));
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    Err(SncfrError::AuthExpired {
+        instance: target_host,
+    })
+}
+
+async fn probe_cdp_page_session(
+    ws_url: &str,
+    instance_url: &Url,
+    target_host: &str,
+) -> Result<Option<(String, String)>, SncfrError> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .map_err(|e| SncfrError::NetworkOrInstance {
+            message: format!("Failed to connect to CDP WebSocket '{ws_url}': {e}"),
+            status: None,
+            remediation: None,
+        })?;
+
+    // 1. Evaluate `window.g_ck`
+    let eval_cmd = json!({
+        "id": 1,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "typeof window.g_ck === 'string' && window.g_ck.length >= 16 ? window.g_ck : null",
+            "returnByValue": true
+        }
+    });
+    let _ = ws.send(Message::Text(eval_cmd.to_string().into())).await;
+    let eval_resp = read_cdp_response_by_id(&mut ws, 1).await?;
+    let mut g_ck = eval_resp
+        .pointer("/result/result/value")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // 2. Fetch all domain cookies via `Network.getCookies`
+    let cookies_cmd = json!({
+        "id": 2,
+        "method": "Network.getCookies",
+        "params": {
+            "urls": [instance_url.as_str()]
+        }
+    });
+    let _ = ws.send(Message::Text(cookies_cmd.to_string().into())).await;
+    let cookies_resp = read_cdp_response_by_id(&mut ws, 2).await?;
+
+    let cookies_val = cookies_resp
+        .pointer("/result/cookies")
+        .cloned()
+        .unwrap_or(Value::Array(Vec::new()));
+    let cdp_cookies: Vec<CdpCookie> = serde_json::from_value(cookies_val).unwrap_or_default();
+
+    let mut pairs = Vec::new();
+    let mut has_sn_session_cookie = false;
+    for c in cdp_cookies {
+        let domain_clean = c.domain.trim_start_matches('.').to_lowercase();
+        if !domain_clean.is_empty() && !target_host.ends_with(&domain_clean) {
+            continue;
+        }
+        if matches!(
+            c.name.as_str(),
+            "JSESSIONID" | "glide_user_route" | "glide_session_store" | "glide_user_activity"
+        ) && !c.value.is_empty()
+        {
+            has_sn_session_cookie = true;
+        }
+        pairs.push(format!("{}={}", c.name, c.value));
+    }
+
+    if !has_sn_session_cookie || pairs.is_empty() {
+        let _ = ws.close(None).await;
+        return Ok(None);
+    }
+
+    let cookie_header = pairs.join("; ");
+
+    // If `window.g_ck` wasn't directly on the top frame, try fetching it via the session cookie
+    if g_ck.is_none()
+        && let Ok(Some(fetched)) = fetch_g_ck_with_cookie(instance_url, &cookie_header).await
+    {
+        g_ck = Some(fetched);
+    }
+
+    let Some(token) = g_ck else {
+        let _ = ws.close(None).await;
+        return Ok(None);
+    };
+
+    // 3. Close the isolated `--app` browser window cleanly
+    let close_cmd = json!({
+        "id": 3,
+        "method": "Browser.close",
+        "params": {}
+    });
+    let _ = ws.send(Message::Text(close_cmd.to_string().into())).await;
+    let _ = ws.close(None).await;
+
+    Ok(Some((cookie_header, token)))
+}
+
+async fn read_cdp_response_by_id<S>(ws: &mut S, expected_id: u64) -> Result<Value, SncfrError>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let timeout = tokio::time::sleep(Duration::from_secs(3));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            _ = &mut timeout => {
+                return Err(SncfrError::NetworkOrInstance {
+                    message: format!("Timed out waiting for CDP response id={expected_id}"),
+                    status: None,
+                    remediation: None,
+                });
+            }
+            maybe_msg = ws.next() => {
+                let Some(Ok(msg)) = maybe_msg else {
+                    return Err(SncfrError::NetworkOrInstance {
+                        message: "CDP WebSocket closed unexpectedly".to_string(),
+                        status: None,
+                        remediation: None,
+                    });
+                };
+                if let Message::Text(text) = msg
+                    && let Ok(val) = serde_json::from_str::<Value>(&text)
+                    && val.get("id").and_then(Value::as_u64) == Some(expected_id)
+                {
+                    return Ok(val);
+                }
+            }
+        }
+    }
+}
+
+/// Executes `sncfr auth login`: launches the user's managed Chromium browser in an isolated `--app` window
+/// with CDP enabled, waits for Corporate SSO completion, extracts cookies + `window.g_ck`, closes the window,
+/// and saves the credentials to [`CredentialStore`].
+pub async fn execute_auth_login(
+    cli: &Cli,
+    config: &mut AppConfig,
+    args: &AuthLoginArgs,
+    store: &CredentialStore,
+) -> Result<AuthLoginSummary, SncfrError> {
+    if cli.no_interactive {
+        return Err(SncfrError::AuthRequired {
+            profile: cli
+                .profile
+                .clone()
+                .or_else(|| config.default_profile.clone())
+                .unwrap_or_else(|| "default".to_string()),
+        });
+    }
+
+    let resolved = config.resolve_profile(cli)?;
+    let profile_name = if resolved.name == "adhoc" {
+        cli.profile.as_deref().unwrap_or("default").to_string()
+    } else {
+        resolved.name.clone()
+    };
+
+    let browser_exe = discover_managed_browser(args.browser.as_deref())?;
+    let profile_dir = browser_profile_dir(&resolved.instance_key)?;
+    fs::create_dir_all(&profile_dir).map_err(|e| SncfrError::InvalidArgs {
+        message: format!(
+            "Failed to create isolated browser profile directory '{}': {e}",
+            profile_dir.display()
+        ),
+        remediation: None,
+    })?;
+
+    let cdp_port = pick_ephemeral_port()?;
+    let app_arg = format!("--app={}", resolved.instance_url.as_str());
+    let user_data_arg = format!("--user-data-dir={}", profile_dir.display());
+    let debug_port_arg = format!("--remote-debugging-port={cdp_port}");
+    let allow_origins_arg = format!("--remote-allow-origins=http://127.0.0.1:{cdp_port}");
+
+    let mut child = Command::new(&browser_exe)
+        .arg(&app_arg)
+        .arg(&user_data_arg)
+        .arg(&debug_port_arg)
+        .arg(&allow_origins_arg)
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| SncfrError::NetworkOrInstance {
+            message: format!(
+                "Failed to launch managed browser '{}': {e}",
+                browser_exe.display()
+            ),
+            status: None,
+            remediation: Some(
+                "Pass `--browser /path/to/chrome` or use `sncfr auth import`.".to_string(),
+            ),
+        })?;
+
+    let capture_res = capture_session_via_cdp(
+        cdp_port,
+        &resolved.instance_url,
+        Duration::from_secs(args.timeout_secs),
+    )
+    .await;
+
+    // Ensure the child browser process is cleaned up if still alive
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let (cookie, user_token) = capture_res?;
+    let has_user_token = user_token.is_some();
+
+    let creds = StoredCredentials::new(
+        resolved.instance_url.as_str().trim_end_matches('/'),
+        CredentialPayload::SsoSession { cookie, user_token },
+    );
+    store.save(&resolved.instance_key, &creds)?;
+
+    config.upsert_profile(&profile_name, &resolved.instance_url, AuthMethod::Sso);
+    if let Ok(cfg_path) = default_config_path() {
+        let _ = config.save_to_path(&cfg_path);
+    }
+
+    Ok(AuthLoginSummary {
+        profile: profile_name,
+        instance_url: resolved
+            .instance_url
+            .as_str()
+            .trim_end_matches('/')
+            .to_string(),
+        instance_key: resolved.instance_key,
+        browser_executable: browser_exe.display().to_string(),
+        profile_dir: profile_dir.display().to_string(),
+        has_user_token,
+    })
+}
+
+/// Returns `true` if the current invocation is allowed to auto-launch the isolated Corporate SSO
+/// browser window upon encountering `AuthRequired` or `AuthExpired` (`docs/SPEC.md` Section 3.2).
+pub const fn can_auto_reauth(
+    cli: &Cli,
+    profile: &ResolvedProfile,
+    is_stdin_tty: bool,
+    is_stdout_tty: bool,
+) -> bool {
+    is_stdin_tty
+        && is_stdout_tty
+        && !cli.no_interactive
+        && matches!(profile.auth_method, AuthMethod::Sso)
+}
+
+/// Resolves an authenticated [`ReadOnlyClient`] for `profile`, automatically launching [`execute_auth_login`]
+/// if credentials are missing and `can_auto_reauth` is true.
+pub async fn resolve_authenticated_client(
+    cli: &Cli,
+    config: &mut AppConfig,
+    profile: &ResolvedProfile,
+    store: &CredentialStore,
+    is_stdin_tty: bool,
+    is_stdout_tty: bool,
+) -> Result<ReadOnlyClient, SncfrError> {
+    let auth = match resolve_client_auth(profile, store) {
+        Ok(auth) => auth,
+        Err(SncfrError::AuthRequired { .. })
+            if can_auto_reauth(cli, profile, is_stdin_tty, is_stdout_tty) =>
+        {
+            eprintln!(
+                "No active ServiceNow session for '{}'; launching isolated SSO browser window...",
+                profile.instance_url
+            );
+            let default_login = AuthLoginArgs {
+                browser: None,
+                timeout_secs: 180,
+            };
+            execute_auth_login(cli, config, &default_login, store).await?;
+            resolve_client_auth(profile, store)?
+        }
+        Err(err) => return Err(err),
+    };
+
+    ReadOnlyClient::new(profile.instance_url.clone(), auth)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,5 +1368,135 @@ mod tests {
             .expect("fetch g_ck")
             .expect("g_ck found");
         assert_eq!(g_ck, "fedcba9876543210fedcba9876543210");
+    }
+
+    #[tokio::test]
+    async fn captures_session_via_cdp_websocket_and_closes_browser() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener as AsyncTcpListener;
+
+        // 1. Bind a mock CDP WebSocket server
+        let ws_listener = AsyncTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws");
+        let ws_port = ws_listener.local_addr().expect("ws addr").port();
+
+        let ws_handle = tokio::spawn(async move {
+            let (stream, _) = ws_listener.accept().await.expect("accept ws");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("ws handshake");
+
+            let mut closed_browser = false;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).expect("parse cdp req");
+                let id = req["id"].as_u64().unwrap_or(0);
+                let method = req["method"].as_str().unwrap_or_default();
+                match method {
+                    "Runtime.evaluate" => {
+                        let resp = json!({
+                            "id": id,
+                            "result": {
+                                "result": {
+                                    "type": "string",
+                                    "value": "gck_from_cdp_0123456789abcdef0123456789"
+                                }
+                            }
+                        });
+                        ws.send(Message::Text(resp.to_string().into()))
+                            .await
+                            .expect("send eval resp");
+                    }
+                    "Network.getCookies" => {
+                        let resp = json!({
+                            "id": id,
+                            "result": {
+                                "cookies": [
+                                    {
+                                        "name": "JSESSIONID",
+                                        "value": "cdp_node_999",
+                                        "domain": ".mycompany.service-now.com"
+                                    },
+                                    {
+                                        "name": "glide_user_route",
+                                        "value": "glide.cdp_route",
+                                        "domain": "mycompany.service-now.com"
+                                    }
+                                ]
+                            }
+                        });
+                        ws.send(Message::Text(resp.to_string().into()))
+                            .await
+                            .expect("send cookies resp");
+                    }
+                    "Browser.close" => {
+                        closed_browser = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            closed_browser
+        });
+
+        // 2. Bind a mock CDP HTTP `/json/list` server
+        let http_listener = AsyncTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind http");
+        let cdp_port = http_listener.local_addr().expect("http addr").port();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = http_listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let body = serde_json::to_string(&json!([
+                    {
+                        "type": "page",
+                        "url": "https://mycompany.service-now.com/now/nav/ui/home",
+                        "webSocketDebuggerUrl": format!("ws://127.0.0.1:{ws_port}/devtools/page/1")
+                    }
+                ]))
+                .expect("json list");
+                let http_resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(http_resp.as_bytes()).await;
+            }
+        });
+
+        let instance_url =
+            Url::parse("https://mycompany.service-now.com").expect("parse instance url");
+        let (cookie, user_token) =
+            capture_session_via_cdp(cdp_port, &instance_url, Duration::from_secs(5))
+                .await
+                .expect("capture cdp session");
+
+        assert_eq!(
+            cookie,
+            "JSESSIONID=cdp_node_999; glide_user_route=glide.cdp_route"
+        );
+        assert_eq!(
+            user_token.as_deref(),
+            Some("gck_from_cdp_0123456789abcdef0123456789")
+        );
+        assert!(ws_handle.await.expect("ws task joined"));
+    }
+
+    #[test]
+    fn context_aware_auto_reauth_respects_tty_and_no_interactive() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["sncfr", "list", "--instance", "acme"]).expect("cli");
+        let profile = AppConfig::default().resolve_profile(&cli).expect("profile");
+
+        assert!(can_auto_reauth(&cli, &profile, true, true));
+        assert!(!can_auto_reauth(&cli, &profile, false, true));
+        assert!(!can_auto_reauth(&cli, &profile, true, false));
+
+        let non_interactive_cli =
+            Cli::try_parse_from(["sncfr", "--no-interactive", "list", "--instance", "acme"])
+                .expect("cli no-interactive");
+        assert!(!can_auto_reauth(&non_interactive_cli, &profile, true, true));
     }
 }
