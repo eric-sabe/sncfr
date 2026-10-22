@@ -191,7 +191,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 
 ## 7. Local Configuration & Metadata Cache
 
-### 7.1 Configuration (`~/.config/sncfr/config.toml`)
+### 7.1 Configuration (`~/.config/sncfr/config.toml` or `SNCFR_CONFIG`)
 
 ```toml
 default_profile = "prod"
@@ -207,7 +207,7 @@ team-triage = { table = "incident", query = "assignment_group.name=Cloud Platfor
 watched = { table = "task", query = "watch_listLIKEjavascript:gs.getUserID()^active=true" }
 ```
 
-### 7.2 Local Metadata Cache (`~/.cache/sncfr/<instance>/`)
+### 7.2 Local Metadata Cache (`~/.cache/sncfr/<instance>/` or `SNCFR_CACHE_DIR`)
 
 - `identity.json`: Cached `@me` user `sys_id`, `user_name`, display name, and group `sys_id`/name list (TTL: 24h).
 - `prefixes.json`: Cached `sys_number` prefix $\to$ table name mapping (TTL: 7d), merged with built-in defaults (`INC` $\to$ `incident`, `CHG` $\to$ `change_request`, `RITM` $\to$ `sc_req_item`, `REQ` $\to$ `sc_request`, `SCTASK` $\to$ `sc_task`, `PRB` $\to$ `problem`, `CS` $\to$ `sn_customerservice_case`, `TASK` $\to$ `task`, `KB` $\to$ `kb_knowledge`).

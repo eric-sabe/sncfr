@@ -25,7 +25,7 @@
 - [x] **[#1 — M1.1: Scaffold Cargo package, CLI grammar skeleton (`clap`), and output/error contracts](https://github.com/eric-sabe/sncfr/issues/1)**
   - Initialize Cargo workspace with `clap`, `reqwest` (`rustls-tls-native-roots`), `tokio`, `serde`, `serde_json`, `serde_yaml`, `toml`, `keyring`, `thiserror`, `comfy-table`, `owo-colors`.
   - Complete CLI subcommand definitions and TTY-aware output/error contracts (`0`–`7` exit codes).
-- [ ] **[#2 — M1.2: Implement profile configuration (`config.toml`), env overrides, and local cache manager](https://github.com/eric-sabe/sncfr/issues/2)**
+- [x] **[#2 — M1.2: Implement profile configuration (`config.toml`), env overrides, and local cache manager](https://github.com/eric-sabe/sncfr/issues/2)**
   - Load `~/.config/sncfr/config.toml` (profiles, `read_only`, saved views) + `SNCFR_*` env overrides + `~/.cache/sncfr/<instance>/` TTL cache manager.
 - [ ] **[#3 — M1.3: Implement compile-time `ReadOnlyClient` vs. `MutatingClient` (`WritePermit`) safety boundary](https://github.com/eric-sabe/sncfr/issues/3)**
   - Enforce `ReadOnlyClient` (`GET` / `HEAD` / verified `GET`-only `/api/now/batch`) vs. `MutatingClient` (`WritePermit`), with hard-lock support (`SNCFR_READ_ONLY=1` / `read_only = true`) and zero `DELETE` methods.

@@ -1,19 +1,36 @@
+pub mod cache;
 pub mod cli;
+pub mod config;
 pub mod error;
 pub mod output;
 
 use crate::cli::Cli;
+use crate::config::ResolvedProfile;
 use crate::error::SncfrError;
 use crate::output::ResolvedOutputFormat;
 
-/// Validates top-level CLI invariants (such as the hard read-only lock when `--write` is passed)
-/// and resolves the concrete output format for the invocation.
-pub fn validate_invocation(cli: &Cli, is_tty: bool) -> Result<ResolvedOutputFormat, SncfrError> {
-    if cli.read_only && cli.command.requests_write() {
-        return Err(SncfrError::ReadOnlyLocked {
-            reason: "`--read-only` / `SNCFR_READ_ONLY` is active while `--write` was requested"
-                .to_string(),
-        });
+/// Validates top-level CLI invariants (such as the hard read-only lock when `--write` is passed,
+/// including profile-level `read_only = true` when a profile is provided) and resolves the concrete
+/// output format for the invocation.
+pub fn validate_invocation(
+    cli: &Cli,
+    profile: Option<&ResolvedProfile>,
+    is_tty: bool,
+) -> Result<ResolvedOutputFormat, SncfrError> {
+    if cli.command.requests_write() {
+        if cli.read_only {
+            return Err(SncfrError::ReadOnlyLocked {
+                reason: "`--read-only` / `SNCFR_READ_ONLY` is active while `--write` was requested"
+                    .to_string(),
+            });
+        }
+        if let Some(prof) = profile
+            && let Some(reason) = &prof.read_only_lock_reason
+        {
+            return Err(SncfrError::ReadOnlyLocked {
+                reason: reason.clone(),
+            });
+        }
     }
 
     Ok(cli
@@ -24,7 +41,9 @@ pub fn validate_invocation(cli: &Cli, is_tty: bool) -> Result<ResolvedOutputForm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AppConfig, AuthMethod, ProfileConfig};
     use clap::Parser;
+    use std::collections::BTreeMap;
 
     #[test]
     fn rejects_write_when_read_only_lock_is_active() {
@@ -38,7 +57,33 @@ mod tests {
         ])
         .expect("parse cli");
 
-        let err = validate_invocation(&cli, false).expect_err("should block --write");
+        let err = validate_invocation(&cli, None, false).expect_err("should block --write");
+        assert_eq!(err.code().exit_code(), 6);
+    }
+
+    #[test]
+    fn rejects_write_when_profile_read_only_is_true() {
+        let mut cfg = AppConfig {
+            default_profile: Some("prod".to_string()),
+            profiles: BTreeMap::new(),
+        };
+        cfg.profiles.insert(
+            "prod".to_string(),
+            ProfileConfig {
+                instance: "https://mycompany.service-now.com".to_string(),
+                auth_method: AuthMethod::Sso,
+                username: None,
+                read_only: true,
+                views: BTreeMap::new(),
+            },
+        );
+
+        let cli = Cli::try_parse_from(["sncfr", "comment", "INC0010042", "Testing", "--write"])
+            .expect("parse cli");
+        let resolved = cfg.resolve_profile(&cli).expect("resolve profile");
+
+        let err =
+            validate_invocation(&cli, Some(&resolved), false).expect_err("profile lock blocks");
         assert_eq!(err.code().exit_code(), 6);
     }
 
@@ -47,7 +92,8 @@ mod tests {
         let cli = Cli::try_parse_from(["sncfr", "--read-only", "comment", "INC0010042", "Testing"])
             .expect("parse cli");
 
-        let fmt = validate_invocation(&cli, false).expect("dry-run is allowed in read-only mode");
+        let fmt =
+            validate_invocation(&cli, None, false).expect("dry-run is allowed in read-only mode");
         assert_eq!(fmt, ResolvedOutputFormat::Md);
     }
 }
