@@ -1,5 +1,8 @@
 use clap::Parser;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
+use sncfr::auth::{
+    AuthImportSummary, AuthLogoutSummary, CredentialStore, execute_auth_import, execute_auth_logout,
+};
 use sncfr::cli::{AuthCommands, Cli, Commands};
 use sncfr::config::AppConfig;
 use sncfr::error::SncfrError;
@@ -35,7 +38,7 @@ async fn main() -> ExitCode {
     };
 
     let output_format = cli.effective_output();
-    let config = match AppConfig::load_default() {
+    let mut config = match AppConfig::load_default() {
         Ok(cfg) => cfg,
         Err(err) => {
             eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
@@ -53,12 +56,104 @@ async fn main() -> ExitCode {
             }
         };
 
-    if let Commands::Auth(AuthCommands::Profiles) = &cli.command {
-        render_profiles(&config, resolved_output);
-        return ExitCode::SUCCESS;
+    match &cli.command {
+        Commands::Auth(AuthCommands::Profiles) => {
+            render_profiles(&config, resolved_output);
+            return ExitCode::SUCCESS;
+        }
+        Commands::Auth(AuthCommands::Import(args)) => {
+            let store = CredentialStore::default_store();
+            match execute_auth_import(&cli, &mut config, args, &store).await {
+                Ok(summary) => {
+                    render_auth_import(&summary, resolved_output);
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Auth(AuthCommands::Logout) => {
+            let profile = match config.resolve_profile(&cli) {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let store = CredentialStore::default_store();
+            match execute_auth_logout(&profile, &store) {
+                Ok(summary) => {
+                    render_auth_logout(&summary, resolved_output);
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        _ => {}
     }
 
     ExitCode::SUCCESS
+}
+
+fn render_auth_import(summary: &AuthImportSummary, format: ResolvedOutputFormat) {
+    match format {
+        ResolvedOutputFormat::Json => {
+            if let Ok(json) = serde_json::to_string_pretty(summary) {
+                println!("{json}");
+            }
+        }
+        ResolvedOutputFormat::Yaml => {
+            if let Ok(yaml) = serde_yaml::to_string(summary) {
+                print!("{yaml}");
+            }
+        }
+        _ => {
+            println!(
+                "Imported {} credentials for profile '{}' ({}) [X-UserToken: {}]",
+                summary.credential_kind,
+                summary.profile,
+                summary.instance_url,
+                if summary.has_user_token {
+                    "present"
+                } else {
+                    "missing"
+                }
+            );
+        }
+    }
+}
+
+fn render_auth_logout(summary: &AuthLogoutSummary, format: ResolvedOutputFormat) {
+    match format {
+        ResolvedOutputFormat::Json => {
+            if let Ok(json) = serde_json::to_string_pretty(summary) {
+                println!("{json}");
+            }
+        }
+        ResolvedOutputFormat::Yaml => {
+            if let Ok(yaml) = serde_yaml::to_string(summary) {
+                print!("{yaml}");
+            }
+        }
+        _ => {
+            if summary.removed {
+                println!(
+                    "Cleared stored credentials for profile '{}' ({}).",
+                    summary.profile, summary.instance_url
+                );
+            } else {
+                println!(
+                    "No stored credentials found for profile '{}' ({}).",
+                    summary.profile, summary.instance_url
+                );
+            }
+        }
+    }
 }
 
 fn render_profiles(config: &AppConfig, format: ResolvedOutputFormat) {

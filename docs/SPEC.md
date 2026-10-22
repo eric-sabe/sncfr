@@ -44,9 +44,10 @@ ServiceNow's official CLI offerings fail the everyday user and AI agent use case
      - Waits for the user to complete SSO/MFA and for the ServiceNow session (`window.g_ck` or authenticated `/api/now/ui/user/current_user`) to become active.
      - Extracts all domain cookies via CDP `Network.getCookies` and `window.g_ck` via `Runtime.evaluate`, closes the window automatically, and stores the encrypted session bundle in the OS Keychain (`keyring`).
 2. **Headless / Manual Session Import (`sncfr auth import`)**:
-   - Accepts a "Copy as cURL" command from browser DevTools, raw `Cookie` + `X-UserToken` values via stdin, or environment variables (`SNCFR_COOKIE`, `SNCFR_USER_TOKEN`) for remote/SSH/container environments.
+   - Accepts a "Copy as cURL" command from browser DevTools, raw `Cookie` + `X-UserToken` values via stdin or `--file`, explicit `--cookie` / `--user-token` flags, or environment variables (`SNCFR_COOKIE`, `SNCFR_USER_TOKEN`) for remote/SSH/container environments. If only a session `Cookie` is provided, `sncfr auth import` automatically attempts to fetch `window.g_ck` (`X-UserToken`) from `/now/nav/ui/home` or `/navpage.do`.
+   - In headless/container environments without an OS Keychain daemon, setting `SNCFR_CREDENTIALS_FILE=/path/to/creds.json` stores credentials in a `0600`-permissioned file store.
 3. **Token / Basic / OAuth Fallback (`api-key`, `basic`, `oauth`)**:
-   - Supports `x-sn-apikey` header tokens, Basic Auth, or OAuth 2.0 Bearer tokens when available (e.g., on Personal Developer Instances or service accounts).
+   - Supports `x-sn-apikey` header tokens (`SNCFR_API_KEY`), Basic Auth (`SNCFR_USERNAME` + `SNCFR_PASSWORD`), or OAuth 2.0 Bearer tokens (`SNCFR_BEARER_TOKEN`) when available (e.g., on Personal Developer Instances or service accounts).
 
 ### 3.2 Session Expiry & Re-Authentication
 

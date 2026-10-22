@@ -275,6 +275,27 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Inserts or updates a profile in `self.profiles` and sets `default_profile` if none was set.
+    pub fn upsert_profile(&mut self, name: &str, instance_url: &Url, auth_method: AuthMethod) {
+        let target_name = if name == "adhoc" { "default" } else { name };
+        let entry = self
+            .profiles
+            .entry(target_name.to_string())
+            .or_insert_with(|| ProfileConfig {
+                instance: instance_url.as_str().trim_end_matches('/').to_string(),
+                auth_method,
+                username: None,
+                read_only: false,
+                views: BTreeMap::new(),
+            });
+        entry.instance = instance_url.as_str().trim_end_matches('/').to_string();
+        entry.auth_method = auth_method;
+
+        if self.default_profile.is_none() {
+            self.default_profile = Some(target_name.to_string());
+        }
+    }
+
     /// Resolves the active [`ResolvedProfile`] for the given [`Cli`] flags and config state.
     pub fn resolve_profile(&self, cli: &Cli) -> Result<ResolvedProfile, SncfrError> {
         // Determine target profile name if any exist in config
