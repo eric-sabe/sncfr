@@ -20,7 +20,7 @@
 
 ---
 
-## [Milestone 1: Rust Workspace, Config, & Compile-Time Safety Core](https://github.com/eric-sabe/sncfr/milestone/1)
+## [Milestone 1: Rust Workspace, Config, & Compile-Time Safety Core](https://github.com/eric-sabe/sncfr/milestone/1) (Completed)
 
 - [x] **[#1 — M1.1: Scaffold Cargo package, CLI grammar skeleton (`clap`), and output/error contracts](https://github.com/eric-sabe/sncfr/issues/1)**
   - Initialize Cargo workspace with `clap`, `reqwest` (`rustls-tls-native-roots`), `tokio`, `serde`, `serde_json`, `serde_yaml`, `toml`, `keyring`, `thiserror`, `comfy-table`, `owo-colors`.
@@ -29,7 +29,7 @@
   - Load `~/.config/sncfr/config.toml` (profiles, `read_only`, saved views) + `SNCFR_*` env overrides + `~/.cache/sncfr/<instance>/` TTL cache manager.
 - [x] **[#3 — M1.3: Implement compile-time `ReadOnlyClient` vs. `MutatingClient` (`WritePermit`) safety boundary](https://github.com/eric-sabe/sncfr/issues/3)**
   - Enforce `ReadOnlyClient` (`GET` / `HEAD` / verified `GET`-only `/api/now/batch`) vs. `MutatingClient` (`WritePermit`), with hard-lock support (`SNCFR_READ_ONLY=1` / `read_only = true`) and zero `DELETE` methods.
-- [ ] **[#4 — M1.4: Implement ServiceNow encoded query builder and UI URL parser (`--from-url`)](https://github.com/eric-sabe/sncfr/issues/4)**
+- [x] **[#4 — M1.4: Implement ServiceNow encoded query builder and UI URL parser (`--from-url`)](https://github.com/eric-sabe/sncfr/issues/4)**
   - Typed `EncodedQuery` builder, relative duration translator (`4h`, `7d`), and parser for classic & Next Experience ServiceNow browser URLs.
 
 ---
