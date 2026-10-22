@@ -22,7 +22,7 @@
 
 ## [Milestone 1: Rust Workspace, Config, & Compile-Time Safety Core](https://github.com/eric-sabe/sncfr/milestone/1)
 
-- [ ] **[#1 — M1.1: Scaffold Cargo package, CLI grammar skeleton (`clap`), and output/error contracts](https://github.com/eric-sabe/sncfr/issues/1)**
+- [x] **[#1 — M1.1: Scaffold Cargo package, CLI grammar skeleton (`clap`), and output/error contracts](https://github.com/eric-sabe/sncfr/issues/1)**
   - Initialize Cargo workspace with `clap`, `reqwest` (`rustls-tls-native-roots`), `tokio`, `serde`, `serde_json`, `serde_yaml`, `toml`, `keyring`, `thiserror`, `comfy-table`, `owo-colors`.
   - Complete CLI subcommand definitions and TTY-aware output/error contracts (`0`–`7` exit codes).
 - [ ] **[#2 — M1.2: Implement profile configuration (`config.toml`), env overrides, and local cache manager](https://github.com/eric-sabe/sncfr/issues/2)**

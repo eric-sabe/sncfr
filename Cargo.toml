@@ -1,0 +1,36 @@
+[package]
+name = "sncfr"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-friendly, read-only-by-default ServiceNow CLI for non-admin users"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/eric-sabe/sncfr"
+readme = "README.md"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+comfy-table = "7.1"
+directories = "5.0"
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+owo-colors = { version = "4.1", features = ["supports-colors"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "cookies",
+    "json",
+    "multipart",
+    "stream",
+    "gzip",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "2.0"
+tokio = { version = "1.40", features = ["full"] }
+toml = "0.8"
+url = { version = "2.5", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.12"
+wiremock = "0.6"

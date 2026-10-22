@@ -86,6 +86,17 @@ When a mutating command (`comment`, `note`, `update`, `create`, `attach`, `appro
 
 ## 5. Command Taxonomy & Grammar
 
+### 5.0 Global CLI Options
+
+All subcommands accept the following global flags:
+- `--profile <name>` (`-p`, env `SNCFR_PROFILE`): Select named connection profile from `config.toml`.
+- `--instance <url-or-host>` (env `SNCFR_INSTANCE`): Target ServiceNow instance URL or hostname (overrides profile).
+- `--output <auto|md|json|yaml|table>` (`-o`, env `SNCFR_OUTPUT`, default `auto`): Output format mode.
+- `--json`: Shorthand for `--output json`.
+- `--no-interactive`: Never prompt or auto-launch interactive SSO browser windows.
+- `--read-only` (env `SNCFR_READ_ONLY`): Enforce hard read-only lock for the invocation (rejects `--write` with exit code `6`).
+- `--verbose` (`-v`): Enable verbose diagnostic logging to `stderr`.
+
 ### 5.1 Ticket Prefix Auto-Resolution
 
 Commands that accept a `<TICKET>` identifier accept any ticket number (case-insensitive, e.g., `INC0010042`, `ritm0049210`, `CHG0031002`, `SCTASK0019283`, `PRB0010011`, `REQ0010200`, `CS0010400`, or custom prefixes like `SEC0010099`):
