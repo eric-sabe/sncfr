@@ -1,0 +1,20 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# OS & Editor artifacts
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local secrets / environment overrides
+.env
+.env.*
+*.pem
+*.key
