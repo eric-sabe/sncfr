@@ -60,7 +60,7 @@
 
 ## [Milestone 4: Validated Dry-Run Previews, Mutations (`--write`), & Schema Caching](https://github.com/eric-sabe/sncfr/milestone/4)
 
-- [ ] **[#12 — M4.1: Implement `sncfr schema` introspection (`sys_dictionary` / `sys_choice`) and local TTL metadata cache](https://github.com/eric-sabe/sncfr/issues/12)**
+- [x] **[#12 — M4.1: Implement `sncfr schema` introspection (`sys_dictionary` / `sys_choice`) and local TTL metadata cache](https://github.com/eric-sabe/sncfr/issues/12)**
   - Table dictionary and choice list introspection + local TTL caching (`schemas/<table>.json`).
 - [ ] **[#13 — M4.2: Implement Validated Dry-Run Preview engine and ticket mutations (`comment`, `note`, `update`, `create`, `attach`)](https://github.com/eric-sabe/sncfr/issues/13)**
   - Live-validated dry-run diff previews by default and `--write` execution for `comment`, `note`, `update`, `create`, and `attach`.

@@ -11,6 +11,7 @@ pub mod monitor;
 pub mod output;
 pub mod query;
 pub mod resolve;
+pub mod schema;
 
 use crate::cli::Cli;
 use crate::client::WritePermit;

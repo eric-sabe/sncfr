@@ -17,6 +17,7 @@ use sncfr::monitor::{
     execute_attachments, execute_feed, execute_stats, format_attachments, format_feed, format_stats,
 };
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
+use sncfr::schema::{execute_schema, format_schema};
 use sncfr::validate_invocation;
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -398,6 +399,26 @@ async fn main() -> ExitCode {
             match execute_attachments(&client, &cache, args).await {
                 Ok(env) => {
                     println!("{}", format_attachments(&env, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Schema(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_schema(&client, &cache, args).await {
+                Ok(schema) => {
+                    println!("{}", format_schema(&schema, args, resolved_output));
                     return ExitCode::SUCCESS;
                 }
                 Err(err) => {
