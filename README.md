@@ -18,22 +18,50 @@ An agent-friendly, **read-only-by-default** Rust CLI for non-admin ServiceNow us
 
 ---
 
-## Installation
+## Installation & Building from Source
 
-### From Git / Source (Rust 1.85+)
+### Prerequisites
+- **Rust**: 1.85+ (Rust 2024 Edition)
+- **OS Keychain Dependencies**:
+  - **macOS**: Native Keychain works out of the box.
+  - **Windows**: Native Credential Manager works out of the box.
+  - **Linux**: Requires `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu: `sudo apt-get install pkg-config libdbus-1-dev`).
+
+### Compile & Install
 
 ```bash
-# Install directly from GitHub
+# Install directly from GitHub into ~/.cargo/bin
 cargo install --git https://github.com/eric-sabe/sncfr.git
 
-# Or clone and install locally
+# Or clone and build locally
 git clone https://github.com/eric-sabe/sncfr.git
 cd sncfr
+
+# Build optimized release binary (./target/release/sncfr)
+cargo build --release
+
+# Or install the local checkout into ~/.cargo/bin
 cargo install --path .
 ```
 
-> [!NOTE]
-> On Linux, install `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu: `sudo apt-get install pkg-config libdbus-1-dev`) for OS Secret Service keyring integration. On macOS (Keychain) and Windows (Credential Manager), native OS credential stores work out of the box.
+---
+
+## Testing
+
+### 1. Offline Unit & End-to-End (`wiremock`) Test Suite
+The repository includes 43 unit tests and a full-binary `wiremock` E2E test suite ([`tests/e2e_cli.rs`](tests/e2e_cli.rs)) that exercises authentication, `doctor`, `show`, `list`, `stats`, dry-run validation, `--write` mutations, and `SNCFR_READ_ONLY=1` locks without requiring a live ServiceNow instance:
+
+```bash
+# Run all unit and integration tests
+cargo test --all-targets --all-features
+
+# Check formatting and Clippy lints (enforced in CI)
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+### 2. Live Instance Functional & Smoke Testing
+See [`docs/TESTING.md`](docs/TESTING.md) for a step-by-step functional test plan against a live Corporate SSO ServiceNow instance (Phases 0–4 are 100% read-only, including Validated Dry-Run Previews and `SNCFR_READ_ONLY=1` lock verification).
 
 ---
 
