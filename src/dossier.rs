@@ -5,9 +5,9 @@ use crate::client::{
     extract_field_value,
 };
 use crate::error::SncfrError;
-use crate::output::ResolvedOutputFormat;
+use crate::output::{ResolvedOutputFormat, osc8_link, styled_table_cell};
 use crate::resolve::resolve_ticket;
-use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
+use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -688,8 +688,13 @@ fn format_single_dossier_terminal(d: &TicketDossier) -> String {
         .get("short_description")
         .map(|f| f.display_value.as_str())
         .unwrap_or("(no short description)");
-    out.push_str(&format!("{} [{}] — {}\n", d.number, d.table, short_desc));
-    out.push_str(&format!("URL:    {}\n", d.ui_url));
+    out.push_str(&format!(
+        "{} [{}] — {}\n",
+        osc8_link(&d.ui_url, &d.number),
+        d.table,
+        short_desc
+    ));
+    out.push_str(&format!("URL:    {}\n", osc8_link(&d.ui_url, &d.ui_url)));
     out.push_str(&format!("sys_id: {}\n\n", d.sys_id));
 
     let mut kv_table = Table::new();
@@ -702,10 +707,10 @@ fn format_single_dossier_terminal(d: &TicketDossier) -> String {
         if k == "description" || k == "close_notes" || k == "short_description" {
             continue;
         }
-        kv_table.add_row(vec![k.as_str(), v.display_value.as_str()]);
+        kv_table.add_row(vec![Cell::new(k), styled_table_cell(k, &v.display_value)]);
     }
     for (k, v) in &d.custom_fields {
-        kv_table.add_row(vec![k.as_str(), v.display_value.as_str()]);
+        kv_table.add_row(vec![Cell::new(k), styled_table_cell(k, &v.display_value)]);
     }
     out.push_str(&kv_table.to_string());
     out.push('\n');

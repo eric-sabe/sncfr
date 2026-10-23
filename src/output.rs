@@ -1,5 +1,6 @@
 use crate::error::SncfrError;
 use clap::ValueEnum;
+use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -113,6 +114,76 @@ pub fn format_error(err: &SncfrError, output: OutputFormat, is_tty: bool) -> Str
     }
 }
 
+/// Formats `text` as a clickable OSC 8 terminal hyperlink to `url` (`docs/SPEC.md` Section 6.2).
+pub fn osc8_link(url: &str, text: &str) -> String {
+    if url.trim().is_empty() || text.trim().is_empty() {
+        return text.to_string();
+    }
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
+/// Returns a [`comfy_table::Cell`] with status/priority color-coding for terminal tables (`docs/SPEC.md` Section 6.2).
+pub fn styled_table_cell(column: &str, value: &str) -> Cell {
+    let col_lower = column.to_ascii_lowercase();
+    let val_lower = value.to_ascii_lowercase();
+
+    if matches!(
+        col_lower.as_str(),
+        "state" | "incident_state" | "stage" | "approval"
+    ) {
+        if val_lower.contains("resolved")
+            || val_lower.contains("closed")
+            || val_lower.contains("complete")
+            || val_lower.contains("approved")
+        {
+            return Cell::new(value).fg(Color::Green);
+        }
+        if val_lower.contains("progress")
+            || val_lower.contains("open")
+            || val_lower.contains("active")
+            || val_lower.contains("requested")
+        {
+            return Cell::new(value).fg(Color::Cyan);
+        }
+        if val_lower.contains("hold")
+            || val_lower.contains("pending")
+            || val_lower.contains("awaiting")
+        {
+            return Cell::new(value).fg(Color::Yellow);
+        }
+        if val_lower.contains("cancel")
+            || val_lower.contains("reject")
+            || val_lower.contains("fail")
+        {
+            return Cell::new(value).fg(Color::Red);
+        }
+        if val_lower == "new" {
+            return Cell::new(value)
+                .fg(Color::Blue)
+                .add_attribute(Attribute::Bold);
+        }
+    } else if matches!(col_lower.as_str(), "priority" | "severity" | "urgency") {
+        if val_lower.starts_with('1') || val_lower.contains("critical") {
+            return Cell::new(value)
+                .fg(Color::Red)
+                .add_attribute(Attribute::Bold);
+        }
+        if val_lower.starts_with('2') || val_lower.contains("high") {
+            return Cell::new(value)
+                .fg(Color::Yellow)
+                .add_attribute(Attribute::Bold);
+        }
+        if val_lower.starts_with('3')
+            || val_lower.contains("moderate")
+            || val_lower.contains("medium")
+        {
+            return Cell::new(value).fg(Color::Cyan);
+        }
+    }
+
+    Cell::new(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +245,18 @@ mod tests {
             serde_json::from_str(&rendered).expect("valid JSON error envelope");
         assert_eq!(parsed["error"]["code"], "READ_ONLY_LOCKED");
         assert_eq!(parsed["error"]["exit_code"], 6);
+    }
+
+    #[test]
+    fn formats_osc8_clickable_terminal_hyperlink() {
+        let link = osc8_link(
+            "https://acme.service-now.com/nav_to.do?uri=incident.do?sys_id=123",
+            "INC0010042",
+        );
+        assert_eq!(
+            link,
+            "\x1b]8;;https://acme.service-now.com/nav_to.do?uri=incident.do?sys_id=123\x1b\\INC0010042\x1b]8;;\x1b\\"
+        );
+        assert!(link.contains("INC0010042"));
     }
 }

@@ -9,7 +9,7 @@ use sncfr::cache::InstanceCache;
 use sncfr::cli::{
     ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands, SkillCommands,
 };
-use sncfr::client::ReadOnlyClient;
+use sncfr::client::{ReadOnlyClient, WritePermit};
 use sncfr::config::{AppConfig, ResolvedProfile};
 use sncfr::doctor::{execute_doctor, format_doctor_report};
 use sncfr::dossier::{assemble_ticket_dossier, format_ticket_dossiers};
@@ -130,520 +130,6 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Commands::Auth(AuthCommands::Status) => {
-            let profile = match config.resolve_profile(&cli) {
-                Ok(p) => p,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let store = CredentialStore::default_store();
-            let cache = match InstanceCache::for_instance(&profile.instance_key) {
-                Ok(c) => c,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let mut client = match resolve_authenticated_client(
-                &cli,
-                &mut config,
-                &profile,
-                &store,
-                is_stdin_tty,
-                is_stdout_tty,
-            )
-            .await
-            {
-                Ok(c) => c,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let mut res = execute_auth_status(&profile, &client, &cache).await;
-            if matches!(res, Err(SncfrError::AuthExpired { .. }))
-                && can_auto_reauth(&cli, &profile, is_stdin_tty, is_stdout_tty)
-            {
-                eprintln!(
-                    "ServiceNow session expired for '{}'; launching isolated SSO browser window...",
-                    profile.instance_url
-                );
-                let login_args = AuthLoginArgs {
-                    browser: None,
-                    timeout_secs: 180,
-                };
-                if execute_auth_login(&cli, &mut config, &login_args, &store)
-                    .await
-                    .is_ok()
-                    && let Ok(new_client) = resolve_authenticated_client(
-                        &cli,
-                        &mut config,
-                        &profile,
-                        &store,
-                        false,
-                        false,
-                    )
-                    .await
-                {
-                    client = new_client;
-                    res = execute_auth_status(&profile, &client, &cache).await;
-                }
-            }
-            match res {
-                Ok(summary) => {
-                    render_auth_status(&summary, resolved_output);
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Doctor => {
-            let profile = match config.resolve_profile(&cli) {
-                Ok(p) => p,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let store = CredentialStore::default_store();
-            let cache = match InstanceCache::for_instance(&profile.instance_key) {
-                Ok(c) => c,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let mut client = match resolve_authenticated_client(
-                &cli,
-                &mut config,
-                &profile,
-                &store,
-                is_stdin_tty,
-                is_stdout_tty,
-            )
-            .await
-            {
-                Ok(c) => c,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let mut res = execute_doctor(&profile, &client, &cache).await;
-            if matches!(res, Err(SncfrError::AuthExpired { .. }))
-                && can_auto_reauth(&cli, &profile, is_stdin_tty, is_stdout_tty)
-            {
-                eprintln!(
-                    "ServiceNow session expired for '{}'; launching isolated SSO browser window...",
-                    profile.instance_url
-                );
-                let login_args = AuthLoginArgs {
-                    browser: None,
-                    timeout_secs: 180,
-                };
-                if execute_auth_login(&cli, &mut config, &login_args, &store)
-                    .await
-                    .is_ok()
-                    && let Ok(new_client) = resolve_authenticated_client(
-                        &cli,
-                        &mut config,
-                        &profile,
-                        &store,
-                        false,
-                        false,
-                    )
-                    .await
-                {
-                    client = new_client;
-                    res = execute_doctor(&profile, &client, &cache).await;
-                }
-            }
-            match res {
-                Ok(report) => {
-                    println!("{}", format_doctor_report(&report, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Show(args) => {
-            let (profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-
-            let _ = profile;
-            let mut dossiers = Vec::with_capacity(args.tickets.len());
-            for ticket_id in &args.tickets {
-                match assemble_ticket_dossier(&client, &cache, args, ticket_id).await {
-                    Ok(d) => dossiers.push(d),
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                }
-            }
-            println!("{}", format_ticket_dossiers(&dossiers, resolved_output));
-            return ExitCode::SUCCESS;
-        }
-        Commands::List(args) => {
-            let (profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_list(&profile, &client, &cache, args).await {
-                Ok(env) => {
-                    println!("{}", format_record_list(&env, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Search(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_search(&client, &cache, args).await {
-                Ok(env) => {
-                    println!("{}", format_record_list(&env, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Table(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_table(&client, &cache, args).await {
-                Ok(env) => {
-                    println!("{}", format_record_list(&env, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Stats(args) => {
-            let (profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_stats(&profile, &client, &cache, args).await {
-                Ok(env) => {
-                    println!("{}", format_stats(&env, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Feed(args) => {
-            let (profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_feed(&profile, &client, &cache, args).await {
-                Ok(env) => {
-                    println!("{}", format_feed(&env, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Attachments(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_attachments(&client, &cache, args).await {
-                Ok(env) => {
-                    println!("{}", format_attachments(&env, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Schema(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_schema(&client, &cache, args).await {
-                Ok(schema) => {
-                    println!("{}", format_schema(&schema, args, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Comment(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_comment_or_note(client, &cache, args, false, write_permit).await {
-                Ok(report) => {
-                    println!("{}", format_mutation_report(&report, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Note(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_comment_or_note(client, &cache, args, true, write_permit).await {
-                Ok(report) => {
-                    println!("{}", format_mutation_report(&report, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Update(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_update(client, &cache, args, write_permit).await {
-                Ok(report) => {
-                    println!("{}", format_mutation_report(&report, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Create(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_create(client, &cache, args, write_permit).await {
-                Ok(report) => {
-                    println!("{}", format_mutation_report(&report, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Attach(args) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match execute_attach(client, &cache, args, write_permit).await {
-                Ok(report) => {
-                    println!("{}", format_mutation_report(&report, resolved_output));
-                    return ExitCode::SUCCESS;
-                }
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            }
-        }
-        Commands::Approvals(subcmd) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match subcmd {
-                ApprovalCommands::List(args) => {
-                    match execute_approvals_list(&client, &cache, args).await {
-                        Ok(env) => {
-                            println!("{}", format_approvals(&env, resolved_output));
-                            return ExitCode::SUCCESS;
-                        }
-                        Err(err) => {
-                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                            return err.exit_code();
-                        }
-                    }
-                }
-                ApprovalCommands::Show { approval_or_ticket } => {
-                    match execute_approvals_show(&client, &cache, approval_or_ticket).await {
-                        Ok(env) => {
-                            println!("{}", format_approvals(&env, resolved_output));
-                            return ExitCode::SUCCESS;
-                        }
-                        Err(err) => {
-                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                            return err.exit_code();
-                        }
-                    }
-                }
-                ApprovalCommands::Approve(args) => {
-                    match execute_approval_action(client, &cache, args, true, write_permit).await {
-                        Ok(report) => {
-                            println!("{}", format_mutation_report(&report, resolved_output));
-                            return ExitCode::SUCCESS;
-                        }
-                        Err(err) => {
-                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                            return err.exit_code();
-                        }
-                    }
-                }
-                ApprovalCommands::Reject(args) => {
-                    match execute_approval_action(client, &cache, args, false, write_permit).await {
-                        Ok(report) => {
-                            println!("{}", format_mutation_report(&report, resolved_output));
-                            return ExitCode::SUCCESS;
-                        }
-                        Err(err) => {
-                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                            return err.exit_code();
-                        }
-                    }
-                }
-            }
-        }
-        Commands::Catalog(subcmd) => {
-            let (_profile, cache, client) =
-                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
-                    Ok(ctx) => ctx,
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                };
-            match subcmd {
-                CatalogCommands::Search { query, limit } => {
-                    match execute_catalog_search(&client, query, *limit).await {
-                        Ok(items) => {
-                            println!("{}", format_catalog_search(&items, resolved_output));
-                            return ExitCode::SUCCESS;
-                        }
-                        Err(err) => {
-                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                            return err.exit_code();
-                        }
-                    }
-                }
-                CatalogCommands::Show { item } => match execute_catalog_show(&client, item).await {
-                    Ok(detail) => {
-                        println!("{}", format_catalog_detail(&detail, resolved_output));
-                        return ExitCode::SUCCESS;
-                    }
-                    Err(err) => {
-                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                        return err.exit_code();
-                    }
-                },
-                CatalogCommands::Order(args) => {
-                    match execute_catalog_order(client, &cache, args, write_permit).await {
-                        Ok(report) => {
-                            println!("{}", format_mutation_report(&report, resolved_output));
-                            return ExitCode::SUCCESS;
-                        }
-                        Err(err) => {
-                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                            return err.exit_code();
-                        }
-                    }
-                }
-            }
-        }
         Commands::Skill(subcmd) => match subcmd {
             SkillCommands::Print => {
                 print!(
@@ -665,6 +151,174 @@ async fn main() -> ExitCode {
                 }
             }
         },
+        _ => {}
+    }
+
+    let mut result = execute_authenticated_command(
+        &cli,
+        &mut config,
+        resolved_output,
+        write_permit,
+        is_stdin_tty,
+        is_stdout_tty,
+    )
+    .await;
+
+    if matches!(result, Err(SncfrError::AuthExpired { .. }))
+        && let Ok(profile) = config.resolve_profile(&cli)
+        && can_auto_reauth(&cli, &profile, is_stdin_tty, is_stdout_tty)
+    {
+        eprintln!(
+            "ServiceNow session expired for '{}'; launching isolated SSO browser window...",
+            profile.instance_url
+        );
+        let store = CredentialStore::default_store();
+        let login_args = AuthLoginArgs {
+            browser: None,
+            timeout_secs: 180,
+        };
+        if execute_auth_login(&cli, &mut config, &login_args, &store)
+            .await
+            .is_ok()
+            && let Ok((_, retry_permit)) = validate_invocation(&cli, Some(&profile), is_stdout_tty)
+        {
+            result = execute_authenticated_command(
+                &cli,
+                &mut config,
+                resolved_output,
+                retry_permit,
+                false,
+                false,
+            )
+            .await;
+        }
+    }
+
+    match result {
+        Ok(rendered) => {
+            if !rendered.is_empty() {
+                println!("{rendered}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+            err.exit_code()
+        }
+    }
+}
+
+async fn execute_authenticated_command(
+    cli: &Cli,
+    config: &mut AppConfig,
+    resolved_output: ResolvedOutputFormat,
+    write_permit: Option<WritePermit>,
+    is_stdin_tty: bool,
+    is_stdout_tty: bool,
+) -> Result<String, SncfrError> {
+    let (profile, cache, client) =
+        prepare_read_context(cli, config, is_stdin_tty, is_stdout_tty).await?;
+
+    match &cli.command {
+        Commands::Auth(AuthCommands::Status) => {
+            let summary = execute_auth_status(&profile, &client, &cache).await?;
+            render_auth_status(&summary, resolved_output);
+            Ok(String::new())
+        }
+        Commands::Doctor => {
+            let report = execute_doctor(&profile, &client, &cache).await?;
+            Ok(format_doctor_report(&report, resolved_output))
+        }
+        Commands::Show(args) => {
+            let mut dossiers = Vec::with_capacity(args.tickets.len());
+            for ticket_id in &args.tickets {
+                dossiers.push(assemble_ticket_dossier(&client, &cache, args, ticket_id).await?);
+            }
+            Ok(format_ticket_dossiers(&dossiers, resolved_output))
+        }
+        Commands::List(args) => {
+            let env = execute_list(&profile, &client, &cache, args).await?;
+            Ok(format_record_list(&env, resolved_output))
+        }
+        Commands::Search(args) => {
+            let env = execute_search(&client, &cache, args).await?;
+            Ok(format_record_list(&env, resolved_output))
+        }
+        Commands::Table(args) => {
+            let env = execute_table(&client, &cache, args).await?;
+            Ok(format_record_list(&env, resolved_output))
+        }
+        Commands::Stats(args) => {
+            let env = execute_stats(&profile, &client, &cache, args).await?;
+            Ok(format_stats(&env, resolved_output))
+        }
+        Commands::Feed(args) => {
+            let env = execute_feed(&profile, &client, &cache, args).await?;
+            Ok(format_feed(&env, resolved_output))
+        }
+        Commands::Attachments(args) => {
+            let env = execute_attachments(&client, &cache, args).await?;
+            Ok(format_attachments(&env, resolved_output))
+        }
+        Commands::Schema(args) => {
+            let schema = execute_schema(&client, &cache, args).await?;
+            Ok(format_schema(&schema, args, resolved_output))
+        }
+        Commands::Comment(args) => {
+            let report = execute_comment_or_note(client, &cache, args, false, write_permit).await?;
+            Ok(format_mutation_report(&report, resolved_output))
+        }
+        Commands::Note(args) => {
+            let report = execute_comment_or_note(client, &cache, args, true, write_permit).await?;
+            Ok(format_mutation_report(&report, resolved_output))
+        }
+        Commands::Update(args) => {
+            let report = execute_update(client, &cache, args, write_permit).await?;
+            Ok(format_mutation_report(&report, resolved_output))
+        }
+        Commands::Create(args) => {
+            let report = execute_create(client, &cache, args, write_permit).await?;
+            Ok(format_mutation_report(&report, resolved_output))
+        }
+        Commands::Attach(args) => {
+            let report = execute_attach(client, &cache, args, write_permit).await?;
+            Ok(format_mutation_report(&report, resolved_output))
+        }
+        Commands::Approvals(subcmd) => match subcmd {
+            ApprovalCommands::List(args) => {
+                let env = execute_approvals_list(&client, &cache, args).await?;
+                Ok(format_approvals(&env, resolved_output))
+            }
+            ApprovalCommands::Show { approval_or_ticket } => {
+                let env = execute_approvals_show(&client, &cache, approval_or_ticket).await?;
+                Ok(format_approvals(&env, resolved_output))
+            }
+            ApprovalCommands::Approve(args) => {
+                let report =
+                    execute_approval_action(client, &cache, args, true, write_permit).await?;
+                Ok(format_mutation_report(&report, resolved_output))
+            }
+            ApprovalCommands::Reject(args) => {
+                let report =
+                    execute_approval_action(client, &cache, args, false, write_permit).await?;
+                Ok(format_mutation_report(&report, resolved_output))
+            }
+        },
+        Commands::Catalog(subcmd) => match subcmd {
+            CatalogCommands::Search { query, limit } => {
+                let items = execute_catalog_search(&client, query, *limit).await?;
+                Ok(format_catalog_search(&items, resolved_output))
+            }
+            CatalogCommands::Show { item } => {
+                let detail = execute_catalog_show(&client, item).await?;
+                Ok(format_catalog_detail(&detail, resolved_output))
+            }
+            CatalogCommands::Order(args) => {
+                let report = execute_catalog_order(client, &cache, args, write_permit).await?;
+                Ok(format_mutation_report(&report, resolved_output))
+            }
+        },
+        Commands::Auth(_) | Commands::Skill(_) => unreachable!(),
     }
 }
 

@@ -31,7 +31,6 @@ jobs:
   rust:
     name: Rust Format, Clippy & Test
     runs-on: ubuntu-latest
-    if: hashFiles('Cargo.toml') != ''
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies (libdbus for keyring on Linux)

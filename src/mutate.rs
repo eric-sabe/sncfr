@@ -5,7 +5,7 @@ use crate::client::{
     ReadOnlyClient, WritePermit, extract_field_display, extract_field_pair, extract_field_value,
 };
 use crate::error::SncfrError;
-use crate::output::ResolvedOutputFormat;
+use crate::output::{ResolvedOutputFormat, osc8_link};
 use crate::resolve::{is_sys_id, load_or_sync_prefixes, resolve_table_name, resolve_ticket};
 use crate::schema::{load_or_sync_table_schema, resolve_choice_value};
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
@@ -110,14 +110,15 @@ pub async fn execute_comment_or_note(
     } else {
         let commit_cmd = if let Some(file) = &args.file {
             format!(
-                "sncfr {op_name} {} --file {:?} --write",
-                resolved.number,
-                file.display()
+                "sncfr {op_name} {} --file {} --write",
+                shell_quote(&resolved.number),
+                shell_quote(&file.display().to_string())
             )
         } else {
             format!(
-                "sncfr {op_name} {} {:?} --write",
-                resolved.number, body_text
+                "sncfr {op_name} {} {} --write",
+                shell_quote(&resolved.number),
+                shell_quote(&body_text)
             )
         };
         Ok(MutationReport {
@@ -283,7 +284,7 @@ pub async fn execute_update(
             ui_url: Some(ui_url),
             diffs,
             attachments: vec![],
-            commit_command: Some(format!("sncfr update {} ... --write", resolved.number)),
+            commit_command: Some(build_update_commit_command(&resolved.number, args)),
         })
     }
 }
@@ -439,10 +440,7 @@ pub async fn execute_create(
             ui_url: None,
             diffs,
             attachments: vec![],
-            commit_command: Some(format!(
-                "sncfr create {table} --short-description {:?} ... --write",
-                args.short_description
-            )),
+            commit_command: Some(build_create_commit_command(&table, args)),
         })
     }
 }
@@ -548,7 +546,7 @@ pub async fn execute_attach(
             ui_url: Some(ui_url),
             diffs: vec![],
             attachments: items,
-            commit_command: Some(format!("sncfr attach {} ... --write", resolved.number)),
+            commit_command: Some(build_attach_commit_command(&resolved.number, args)),
         })
     }
 }
@@ -707,6 +705,98 @@ pub fn parse_key_value_pair(raw: &str) -> Result<(String, String), SncfrError> {
     Ok((key.to_string(), v.trim().to_string()))
 }
 
+/// Quotes a CLI argument for safe copy-pasting in POSIX shells.
+pub fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '=')
+        })
+    {
+        return arg.to_string();
+    }
+    if !arg.contains('\'') {
+        format!("'{arg}'")
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+fn build_update_commit_command(ticket_number: &str, args: &UpdateArgs) -> String {
+    let mut parts = vec![
+        "sncfr".to_string(),
+        "update".to_string(),
+        shell_quote(ticket_number),
+    ];
+    for (flag, opt_val) in [
+        ("--state", &args.state),
+        ("--priority", &args.priority),
+        ("--urgency", &args.urgency),
+        ("--impact", &args.impact),
+        ("--assign-to", &args.assign_to),
+        ("--group", &args.group),
+        ("--short-description", &args.short_description),
+        ("--description", &args.description),
+        ("--close-code", &args.close_code),
+        ("--close-notes", &args.close_notes),
+        ("--note", &args.note),
+        ("--comment", &args.comment),
+    ] {
+        if let Some(val) = opt_val {
+            parts.push(flag.to_string());
+            parts.push(shell_quote(val));
+        }
+    }
+    for kv in &args.set_fields {
+        parts.push("--set".to_string());
+        parts.push(shell_quote(kv));
+    }
+    parts.push("--write".to_string());
+    parts.join(" ")
+}
+
+fn build_create_commit_command(table: &str, args: &CreateArgs) -> String {
+    let mut parts = vec![
+        "sncfr".to_string(),
+        "create".to_string(),
+        shell_quote(table),
+        "--short-description".to_string(),
+        shell_quote(&args.short_description),
+    ];
+    for (flag, opt_val) in [
+        ("--description", &args.description),
+        ("--priority", &args.priority),
+        ("--urgency", &args.urgency),
+        ("--impact", &args.impact),
+        ("--assign-to", &args.assign_to),
+        ("--group", &args.group),
+        ("--caller", &args.caller),
+    ] {
+        if let Some(val) = opt_val {
+            parts.push(flag.to_string());
+            parts.push(shell_quote(val));
+        }
+    }
+    for kv in &args.set_fields {
+        parts.push("--set".to_string());
+        parts.push(shell_quote(kv));
+    }
+    parts.push("--write".to_string());
+    parts.join(" ")
+}
+
+fn build_attach_commit_command(ticket_number: &str, args: &AttachArgs) -> String {
+    let mut parts = vec![
+        "sncfr".to_string(),
+        "attach".to_string(),
+        shell_quote(ticket_number),
+    ];
+    for path in &args.files {
+        parts.push(shell_quote(&path.display().to_string()));
+    }
+    parts.push("--write".to_string());
+    parts.join(" ")
+}
+
 fn guess_content_type(path: &Path) -> &'static str {
     match path
         .extension()
@@ -802,14 +892,17 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
                 "[COMMITTED WRITE — Changes Saved to ServiceNow]"
             };
             out.push_str(&format!("{header}\n"));
+            let target_label = match (&report.ticket, &report.ui_url) {
+                (Some(t), Some(url)) => osc8_link(url, t),
+                (Some(t), None) => t.clone(),
+                (None, _) => "(new record)".to_string(),
+            };
             out.push_str(&format!(
                 "Operation: {}\nTarget:    {} (table: {})\n",
-                report.operation,
-                report.ticket.as_deref().unwrap_or("(new record)"),
-                report.table
+                report.operation, target_label, report.table
             ));
             if let Some(url) = &report.ui_url {
-                out.push_str(&format!("URL:       {url}\n"));
+                out.push_str(&format!("URL:       {}\n", osc8_link(url, url)));
             }
 
             if !report.diffs.is_empty() {
@@ -950,7 +1043,12 @@ mod tests {
         assert_eq!(report.diffs[0].before_display.as_deref(), Some("New"));
         assert_eq!(report.diffs[0].after_display, "In Progress");
         assert_eq!(report.diffs[0].after_value, "2");
-        assert!(report.commit_command.is_some());
+        assert_eq!(
+            report.commit_command.as_deref(),
+            Some(
+                "sncfr update INC0010042 --state 'In Progress' --note 'Investigating now' --write"
+            )
+        );
 
         // Now execute with `--write` (`WritePermit`)
         Mock::given(method("PATCH"))

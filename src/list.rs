@@ -6,11 +6,11 @@ use crate::client::{
 };
 use crate::config::{ResolvedProfile, SavedView};
 use crate::error::SncfrError;
-use crate::output::ResolvedOutputFormat;
+use crate::output::{ResolvedOutputFormat, styled_table_cell};
 use crate::query::compile_list_filters;
 use crate::resolve::{load_or_sync_prefixes, resolve_table_name};
 use chrono::Utc;
-use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
+use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -342,10 +342,13 @@ pub fn format_record_list(envelope: &RecordListEnvelope, format: ResolvedOutputF
             );
 
             for rec in &envelope.records {
-                let row: Vec<String> = envelope
+                let row: Vec<Cell> = envelope
                     .columns
                     .iter()
-                    .map(|col| extract_field_display(rec, col).unwrap_or_default())
+                    .map(|col| {
+                        let val = extract_field_display(rec, col).unwrap_or_default();
+                        styled_table_cell(col, &val)
+                    })
                     .collect();
                 table.add_row(row);
             }

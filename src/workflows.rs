@@ -5,11 +5,13 @@ use crate::client::{
     ReadOnlyClient, WritePermit, extract_field_display, extract_field_pair, extract_field_value,
 };
 use crate::error::SncfrError;
-use crate::mutate::{FieldDiff, MutationReport, parse_key_value_pair, resolve_user_reference};
-use crate::output::ResolvedOutputFormat;
+use crate::mutate::{
+    FieldDiff, MutationReport, parse_key_value_pair, resolve_user_reference, shell_quote,
+};
+use crate::output::{ResolvedOutputFormat, styled_table_cell};
 use crate::query::{DYNAMIC_ME_SYS_ID, EncodedQuery};
 use crate::resolve::{is_sys_id, resolve_ticket};
-use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
+use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -236,6 +238,18 @@ pub async fn execute_approval_action(
             commit_command: None,
         })
     } else {
+        let mut cmd_parts = vec![
+            "sncfr".to_string(),
+            "approvals".to_string(),
+            op_name.to_string(),
+            shell_quote(&target.sys_id),
+        ];
+        if let Some(comments) = &args.comments {
+            cmd_parts.push("--comments".to_string());
+            cmd_parts.push(shell_quote(comments));
+        }
+        cmd_parts.push("--write".to_string());
+
         Ok(MutationReport {
             mode: "dry_run".to_string(),
             operation: op_name.to_string(),
@@ -245,10 +259,7 @@ pub async fn execute_approval_action(
             ui_url: Some(ui_url),
             diffs,
             attachments: vec![],
-            commit_command: Some(format!(
-                "sncfr approvals {op_name} {} --write",
-                target.sys_id
-            )),
+            commit_command: Some(cmd_parts.join(" ")),
         })
     }
 }
@@ -518,6 +529,26 @@ pub async fn execute_catalog_order(
         })
     } else {
         let _ = extract_field_pair;
+        let mut cmd_parts = vec![
+            "sncfr".to_string(),
+            "catalog".to_string(),
+            "order".to_string(),
+            shell_quote(&detail.sys_id),
+        ];
+        for kv in &args.variables {
+            cmd_parts.push("--var".to_string());
+            cmd_parts.push(shell_quote(kv));
+        }
+        if args.quantity != 1 {
+            cmd_parts.push("--quantity".to_string());
+            cmd_parts.push(args.quantity.to_string());
+        }
+        if let Some(req_for) = &args.requested_for {
+            cmd_parts.push("--requested-for".to_string());
+            cmd_parts.push(shell_quote(req_for));
+        }
+        cmd_parts.push("--write".to_string());
+
         Ok(MutationReport {
             mode: "dry_run".to_string(),
             operation: "catalog_order".to_string(),
@@ -527,7 +558,7 @@ pub async fn execute_catalog_order(
             ui_url: None,
             diffs,
             attachments: vec![],
-            commit_command: Some(format!("sncfr catalog order {} ... --write", detail.sys_id)),
+            commit_command: Some(cmd_parts.join(" ")),
         })
     }
 }
@@ -567,11 +598,11 @@ pub fn format_approvals(env: &ApprovalsEnvelope, format: ResolvedOutputFormat) -
                 ]);
             for item in &env.items {
                 table.add_row(vec![
-                    item.sys_id.as_str(),
-                    item.target_ticket.as_str(),
-                    item.approver.as_str(),
-                    item.state.as_str(),
-                    item.updated_on.as_str(),
+                    Cell::new(&item.sys_id),
+                    Cell::new(&item.target_ticket),
+                    Cell::new(&item.approver),
+                    styled_table_cell("state", &item.state),
+                    Cell::new(&item.updated_on),
                 ]);
             }
             table.to_string()
@@ -748,5 +779,11 @@ mod tests {
             .expect("catalog order dry-run");
         assert_eq!(dry_run.mode, "dry_run");
         assert_eq!(dry_run.diffs.len(), 1);
+        assert_eq!(
+            dry_run.commit_command.as_deref(),
+            Some(
+                "sncfr catalog order fedcba9876543210fedcba9876543210 --var aws_region=us-east-1 --write"
+            )
+        );
     }
 }

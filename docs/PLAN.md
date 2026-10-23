@@ -73,3 +73,12 @@
 
 - [x] **[#15 — M5.1: Implement instance-aware `sncfr skill <print|install>` generator and `wiremock` E2E test suite](https://github.com/eric-sabe/sncfr/issues/15)**
   - Tailored `SKILL.md` generator/installer and comprehensive `wiremock` integration test suite.
+
+---
+
+## Post-Plan Audit & Hardening (Completed)
+
+- [x] **[#16 — CI: Fix job-level `hashFiles()` expression in `.github/workflows/ci.yml`](https://github.com/eric-sabe/sncfr/issues/16)**
+- [x] **[#17 — Dry-Run: Reconstruct exact copy-pasteable `--write` `commit_command` from CLI args](https://github.com/eric-sabe/sncfr/issues/17)**
+- [x] **[#18 — Output: Add OSC 8 clickable terminal hyperlinks and status color-coding in TTY table/dossier views](https://github.com/eric-sabe/sncfr/issues/18)**
+- [x] **[#19 — Auth: Unify interactive `401 AuthExpired` auto-reauth retry across all subcommands](https://github.com/eric-sabe/sncfr/issues/19)**
