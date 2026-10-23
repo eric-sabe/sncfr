@@ -62,7 +62,7 @@
 
 - [x] **[#12 — M4.1: Implement `sncfr schema` introspection (`sys_dictionary` / `sys_choice`) and local TTL metadata cache](https://github.com/eric-sabe/sncfr/issues/12)**
   - Table dictionary and choice list introspection + local TTL caching (`schemas/<table>.json`).
-- [ ] **[#13 — M4.2: Implement Validated Dry-Run Preview engine and ticket mutations (`comment`, `note`, `update`, `create`, `attach`)](https://github.com/eric-sabe/sncfr/issues/13)**
+- [x] **[#13 — M4.2: Implement Validated Dry-Run Preview engine and ticket mutations (`comment`, `note`, `update`, `create`, `attach`)](https://github.com/eric-sabe/sncfr/issues/13)**
   - Live-validated dry-run diff previews by default and `--write` execution for `comment`, `note`, `update`, `create`, and `attach`.
 - [ ] **[#14 — M4.3: Implement `sncfr approvals` and `sncfr catalog` workflows](https://github.com/eric-sabe/sncfr/issues/14)**
   - Approval inspection/action (`sysapproval_approver`) and Service Catalog browsing/ordering (`/api/sn_sc/servicecatalog`).

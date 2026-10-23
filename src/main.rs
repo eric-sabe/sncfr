@@ -16,6 +16,9 @@ use sncfr::list::{execute_list, execute_search, execute_table, format_record_lis
 use sncfr::monitor::{
     execute_attachments, execute_feed, execute_stats, format_attachments, format_feed, format_stats,
 };
+use sncfr::mutate::{
+    execute_attach, execute_comment_or_note, execute_create, execute_update, format_mutation_report,
+};
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
 use sncfr::schema::{execute_schema, format_schema};
 use sncfr::validate_invocation;
@@ -59,7 +62,7 @@ async fn main() -> ExitCode {
     };
 
     let resolved_profile = config.resolve_profile(&cli).ok();
-    let (resolved_output, _write_permit) =
+    let (resolved_output, write_permit) =
         match validate_invocation(&cli, resolved_profile.as_ref(), is_stdout_tty) {
             Ok(res) => res,
             Err(err) => {
@@ -419,6 +422,106 @@ async fn main() -> ExitCode {
             match execute_schema(&client, &cache, args).await {
                 Ok(schema) => {
                     println!("{}", format_schema(&schema, args, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Comment(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_comment_or_note(client, &cache, args, false, write_permit).await {
+                Ok(report) => {
+                    println!("{}", format_mutation_report(&report, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Note(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_comment_or_note(client, &cache, args, true, write_permit).await {
+                Ok(report) => {
+                    println!("{}", format_mutation_report(&report, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Update(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_update(client, &cache, args, write_permit).await {
+                Ok(report) => {
+                    println!("{}", format_mutation_report(&report, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Create(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_create(client, &cache, args, write_permit).await {
+                Ok(report) => {
+                    println!("{}", format_mutation_report(&report, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Attach(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_attach(client, &cache, args, write_permit).await {
+                Ok(report) => {
+                    println!("{}", format_mutation_report(&report, resolved_output));
                     return ExitCode::SUCCESS;
                 }
                 Err(err) => {
