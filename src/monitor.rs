@@ -153,7 +153,7 @@ pub async fn execute_stats(
         total_count = single_count;
     }
 
-    buckets.sort_by(|a, b| b.count.cmp(&a.count));
+    buckets.sort_by_key(|a| std::cmp::Reverse(a.count));
 
     Ok(StatsEnvelope {
         table,
