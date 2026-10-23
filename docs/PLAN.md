@@ -3,7 +3,7 @@
 - **Status**: Completed (Milestones 0–5 Delivered)
 - **Last Updated**: 2026-10-22
 - **Governing Spec**: [`docs/SPEC.md`](SPEC.md)
-- **GitHub Repository**: [`eric-sabe/sncfr`](https://github.com/eric-sabe/sncfr) (Private)
+- **GitHub Repository**: [`eric-sabe/sncfr`](https://github.com/eric-sabe/sncfr)
 - **GitHub Project Board**: [`sncfr Roadmap` (Project #40)](https://github.com/users/eric-sabe/projects/40)
 
 > [!IMPORTANT]
@@ -16,7 +16,7 @@
 - [x] Feasibility assessment against [`ServiceNow/ServiceNowDocs`](https://github.com/ServiceNow/ServiceNowDocs).
 - [x] Resolve core design decisions (`/grill-me` design review).
 - [x] Establish living documentation (`AGENTS.md`, `docs/SPEC.md`, `docs/PLAN.md`, `docs/adr/`).
-- [x] Initialize private GitHub repository (`eric-sabe/sncfr`), CI workflow, Milestones 1–5, Issues `#1`–`#15`, and Project Board (`#40`).
+- [x] Initialize GitHub repository (`eric-sabe/sncfr`), CI workflow, Milestones 1–5, Issues `#1`–`#15`, and Project Board (`#40`).
 
 ---
 
