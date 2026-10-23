@@ -6,7 +6,7 @@ use sncfr::auth::{
     execute_auth_status, resolve_authenticated_client,
 };
 use sncfr::cache::InstanceCache;
-use sncfr::cli::{AuthCommands, AuthLoginArgs, Cli, Commands};
+use sncfr::cli::{ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands};
 use sncfr::client::ReadOnlyClient;
 use sncfr::config::{AppConfig, ResolvedProfile};
 use sncfr::doctor::{execute_doctor, format_doctor_report};
@@ -22,6 +22,11 @@ use sncfr::mutate::{
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
 use sncfr::schema::{execute_schema, format_schema};
 use sncfr::validate_invocation;
+use sncfr::workflows::{
+    execute_approval_action, execute_approvals_list, execute_approvals_show, execute_catalog_order,
+    execute_catalog_search, execute_catalog_show, format_approvals, format_catalog_detail,
+    format_catalog_search,
+};
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
@@ -527,6 +532,112 @@ async fn main() -> ExitCode {
                 Err(err) => {
                     eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
                     return err.exit_code();
+                }
+            }
+        }
+        Commands::Approvals(subcmd) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match subcmd {
+                ApprovalCommands::List(args) => {
+                    match execute_approvals_list(&client, &cache, args).await {
+                        Ok(env) => {
+                            println!("{}", format_approvals(&env, resolved_output));
+                            return ExitCode::SUCCESS;
+                        }
+                        Err(err) => {
+                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                            return err.exit_code();
+                        }
+                    }
+                }
+                ApprovalCommands::Show { approval_or_ticket } => {
+                    match execute_approvals_show(&client, &cache, approval_or_ticket).await {
+                        Ok(env) => {
+                            println!("{}", format_approvals(&env, resolved_output));
+                            return ExitCode::SUCCESS;
+                        }
+                        Err(err) => {
+                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                            return err.exit_code();
+                        }
+                    }
+                }
+                ApprovalCommands::Approve(args) => {
+                    match execute_approval_action(client, &cache, args, true, write_permit).await {
+                        Ok(report) => {
+                            println!("{}", format_mutation_report(&report, resolved_output));
+                            return ExitCode::SUCCESS;
+                        }
+                        Err(err) => {
+                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                            return err.exit_code();
+                        }
+                    }
+                }
+                ApprovalCommands::Reject(args) => {
+                    match execute_approval_action(client, &cache, args, false, write_permit).await {
+                        Ok(report) => {
+                            println!("{}", format_mutation_report(&report, resolved_output));
+                            return ExitCode::SUCCESS;
+                        }
+                        Err(err) => {
+                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                            return err.exit_code();
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Catalog(subcmd) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match subcmd {
+                CatalogCommands::Search { query, limit } => {
+                    match execute_catalog_search(&client, query, *limit).await {
+                        Ok(items) => {
+                            println!("{}", format_catalog_search(&items, resolved_output));
+                            return ExitCode::SUCCESS;
+                        }
+                        Err(err) => {
+                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                            return err.exit_code();
+                        }
+                    }
+                }
+                CatalogCommands::Show { item } => match execute_catalog_show(&client, item).await {
+                    Ok(detail) => {
+                        println!("{}", format_catalog_detail(&detail, resolved_output));
+                        return ExitCode::SUCCESS;
+                    }
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                },
+                CatalogCommands::Order(args) => {
+                    match execute_catalog_order(client, &cache, args, write_permit).await {
+                        Ok(report) => {
+                            println!("{}", format_mutation_report(&report, resolved_output));
+                            return ExitCode::SUCCESS;
+                        }
+                        Err(err) => {
+                            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                            return err.exit_code();
+                        }
+                    }
                 }
             }
         }
