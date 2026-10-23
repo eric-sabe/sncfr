@@ -125,6 +125,10 @@ impl CredentialStore {
     pub fn load(&self, instance_key: &str) -> Result<Option<StoredCredentials>, SncfrError> {
         match self {
             Self::Keyring => {
+                crate::debug_log!(
+                    "auth",
+                    "Loading credentials from OS Keychain (service='{KEYRING_SERVICE}', account='{instance_key}')"
+                );
                 let entry = keyring::Entry::new(KEYRING_SERVICE, instance_key).map_err(|e| {
                     SncfrError::NetworkOrInstance {
                         message: format!("Failed to access OS Keychain for '{instance_key}': {e}"),
@@ -147,9 +151,16 @@ impl CredentialStore {
                                         .to_string(),
                                 ),
                             })?;
+                        log_loaded_credentials("OS Keychain", instance_key, &creds);
                         Ok(Some(creds))
                     }
-                    Err(keyring::Error::NoEntry) => Ok(None),
+                    Err(keyring::Error::NoEntry) => {
+                        crate::debug_log!(
+                            "auth",
+                            "No stored credentials found in OS Keychain for '{instance_key}'"
+                        );
+                        Ok(None)
+                    }
                     Err(e) => Err(SncfrError::NetworkOrInstance {
                         message: format!(
                             "Failed to read credentials from OS Keychain for '{instance_key}': {e}"
@@ -160,8 +171,22 @@ impl CredentialStore {
                 }
             }
             Self::File(path) => {
+                crate::debug_log!(
+                    "auth",
+                    "Loading credentials from file store '{}' for '{instance_key}'",
+                    path.display()
+                );
                 let map = load_file_map(path)?;
-                Ok(map.get(instance_key).cloned())
+                let found = map.get(instance_key).cloned();
+                if let Some(creds) = &found {
+                    log_loaded_credentials("file store", instance_key, creds);
+                } else {
+                    crate::debug_log!(
+                        "auth",
+                        "No stored credentials found in file store for '{instance_key}'"
+                    );
+                }
+                Ok(found)
             }
         }
     }
@@ -170,6 +195,11 @@ impl CredentialStore {
     pub fn save(&self, instance_key: &str, creds: &StoredCredentials) -> Result<(), SncfrError> {
         match self {
             Self::Keyring => {
+                crate::debug_log!(
+                    "auth",
+                    "Saving {} credentials to OS Keychain (service='{KEYRING_SERVICE}', account='{instance_key}')",
+                    creds.payload.kind_str()
+                );
                 let entry = keyring::Entry::new(KEYRING_SERVICE, instance_key).map_err(|e| {
                     SncfrError::NetworkOrInstance {
                         message: format!("Failed to open OS Keychain for '{instance_key}': {e}"),
@@ -192,9 +222,20 @@ impl CredentialStore {
                             "Ensure your OS Keychain is unlocked or set `SNCFR_CREDENTIALS_FILE`."
                                 .to_string(),
                         ),
-                    })
+                    })?;
+                crate::debug_log!(
+                    "auth",
+                    "Successfully saved credentials to OS Keychain for '{instance_key}'"
+                );
+                Ok(())
             }
             Self::File(path) => {
+                crate::debug_log!(
+                    "auth",
+                    "Saving {} credentials to file store '{}' for '{instance_key}'",
+                    creds.payload.kind_str(),
+                    path.display()
+                );
                 let mut map = load_file_map(path)?;
                 map.insert(instance_key.to_string(), creds.clone());
                 save_file_map(path, &map)
@@ -231,6 +272,28 @@ impl CredentialStore {
                 save_file_map(path, &map)?;
                 Ok(existed)
             }
+        }
+    }
+}
+
+fn log_loaded_credentials(source: &str, instance_key: &str, creds: &StoredCredentials) {
+    match &creds.payload {
+        CredentialPayload::SsoSession { cookie, user_token } => {
+            crate::debug_log!(
+                "auth",
+                "Loaded sso-session from {source} for '{instance_key}' (updated_at={}, {}, X-UserToken={})",
+                creds.updated_at.to_rfc3339(),
+                crate::log::summarize_cookie_names(cookie),
+                crate::log::redact_token(user_token.as_deref())
+            );
+        }
+        other => {
+            crate::debug_log!(
+                "auth",
+                "Loaded {} credentials from {source} for '{instance_key}' (updated_at={})",
+                other.kind_str(),
+                creds.updated_at.to_rfc3339()
+            );
         }
     }
 }
@@ -878,15 +941,26 @@ pub fn discover_managed_browser(explicit: Option<&Path>) -> Result<PathBuf, Sncf
     }
 
     // 1. Prefer the user's OS default browser if it is a supported Chromium browser
-    if let Some(default_kind) = detect_os_default_chromium_browser()
-        && let Some(resolved) = resolve_browser_shorthand(default_kind)
-    {
-        return Ok(resolved);
+    if let Some(default_kind) = detect_os_default_chromium_browser() {
+        crate::debug_log!("browser", "OS default browser detected as '{default_kind}'");
+        if let Some(resolved) = resolve_browser_shorthand(default_kind) {
+            crate::debug_log!(
+                "browser",
+                "Selected OS default Chromium browser executable: {}",
+                resolved.display()
+            );
+            return Ok(resolved);
+        }
     }
 
     // 2. Fallback to installed Chromium browsers
     for shorthand in ["edge", "chrome", "brave", "arc", "chromium"] {
         if let Some(resolved) = resolve_browser_shorthand(shorthand) {
+            crate::debug_log!(
+                "browser",
+                "Selected fallback Chromium browser executable ({shorthand}): {}",
+                resolved.display()
+            );
             return Ok(resolved);
         }
     }
@@ -1164,6 +1238,12 @@ pub async fn capture_session_via_cdp(
     let target_host = instance_url.host_str().unwrap_or_default().to_lowercase();
     let deadline = Instant::now() + timeout;
     let mut last_logged_host = String::new();
+    let mut last_logged_diag = String::new();
+    crate::debug_log!(
+        "cdp",
+        "Starting CDP session polling on {list_url} for target_host='{target_host}' (timeout={}s)",
+        timeout.as_secs()
+    );
 
     while Instant::now() < deadline {
         if let Ok(resp) = http.get(&list_url).send().await
@@ -1184,6 +1264,7 @@ pub async fn capture_session_via_cdp(
                     && h != last_logged_host
                 {
                     last_logged_host = h.to_string();
+                    crate::debug_log!("cdp", "Browser active page navigated to: {}", target.url);
                     if h.eq_ignore_ascii_case(&target_host) {
                         eprintln!(
                             "  [SSO] Browser is on ServiceNow ({h}{}) — checking session...",
@@ -1211,8 +1292,14 @@ pub async fn capture_session_via_cdp(
                     continue;
                 }
 
-                if let Ok(Some((cookie, g_ck))) =
-                    probe_cdp_page_session(ws_url, instance_url, &target.url, &target_host).await
+                if let Ok(Some((cookie, g_ck))) = probe_cdp_page_session(
+                    ws_url,
+                    instance_url,
+                    &target.url,
+                    &target_host,
+                    &mut last_logged_diag,
+                )
+                .await
                 {
                     return Ok((cookie, g_ck));
                 }
@@ -1221,6 +1308,10 @@ pub async fn capture_session_via_cdp(
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
 
+    crate::debug_log!(
+        "cdp",
+        "Timed out waiting for valid ServiceNow session on '{target_host}' (last_diag='{last_logged_diag}')"
+    );
     Err(SncfrError::AuthExpired {
         instance: target_host,
     })
@@ -1242,7 +1333,7 @@ const CDP_SESSION_PROBE_JS: &str = r#"
     href.includes('SAMLResponse=') ||
     href.includes('RelayState=')
   ) {
-    return null;
+    return '__DIAG__:login_or_redirect_url:' + p;
   }
 
   const isValidToken = (t) => {
@@ -1438,13 +1529,15 @@ const CDP_SESSION_PROBE_JS: &str = r#"
   }
 
   // Always verify session authenticity against `/api/now/ui/user/current_user` when `fetch` is available
+  let currentUserDiag = 'not_checked';
   if (typeof fetch === 'function') {
     try {
       const headers = { 'Accept': 'application/json' };
       if (isValidToken(token)) headers['X-UserToken'] = token;
       const r = await fetch('/api/now/ui/user/current_user', { credentials: 'include', headers });
+      currentUserDiag = 'http_' + r.status;
       if (r.status === 401 || r.status === 403 || (r.url || '').toLowerCase().includes('login')) {
-        return null;
+        return '__DIAG__:current_user_unauthenticated:status=' + r.status + ',path=' + p;
       }
       if (r.ok) {
         const hdrTok = r.headers && (r.headers.get('X-UserToken') || r.headers.get('x-usertoken'));
@@ -1454,7 +1547,7 @@ const CDP_SESSION_PROBE_JS: &str = r#"
         const uName = res.user_name || res.userName || res.name || '';
         const uSysId = res.user_sys_id || res.sys_id || res.userID || '';
         if (!isRealUser(uName, uSysId)) {
-          return null;
+          return '__DIAG__:guest_session:user=' + (uName || 'empty') + ',sys_id=' + (uSysId || 'empty') + ',path=' + p;
         }
         authedUser = uName;
         if (!token) {
@@ -1462,18 +1555,24 @@ const CDP_SESSION_PROBE_JS: &str = r#"
           if (isValidToken(bodyTok)) token = bodyTok.trim();
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      currentUserDiag = 'err_' + (e && e.message ? e.message : 'fetch');
+    }
   }
 
   if (!authedUser) {
-    return null;
+    return '__DIAG__:no_authed_user:path=' + p + ',frames=' + wins.length + ',current_user=' + currentUserDiag;
   }
 
   if (!token) {
     token = await fetchTokenFromPages();
   }
 
-  return isValidToken(token) ? token : null;
+  if (!isValidToken(token)) {
+    return '__DIAG__:missing_g_ck:user=' + authedUser + ',path=' + p + ',frames=' + wins.length;
+  }
+
+  return token.trim();
 })()
 "#;
 
@@ -1482,6 +1581,7 @@ async fn probe_cdp_page_session(
     instance_url: &Url,
     page_url: &str,
     target_host: &str,
+    last_logged_diag: &mut String,
 ) -> Result<Option<(String, Option<String>)>, SncfrError> {
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
@@ -1503,12 +1603,33 @@ async fn probe_cdp_page_session(
     });
     let _ = ws.send(Message::Text(eval_cmd.to_string().into())).await;
     let eval_resp = read_cdp_response_by_id(&mut ws, 1).await?;
-    let eval_str = eval_resp
+    let raw_eval = eval_resp
         .pointer("/result/result/value")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|tok| tok.len() >= 16)
-        .map(str::to_string);
+        .unwrap_or("");
+
+    if let Some(diag) = raw_eval.strip_prefix("__DIAG__:") {
+        if *last_logged_diag != diag {
+            *last_logged_diag = diag.to_string();
+            crate::debug_log!("cdp", "ServiceNow page probe not ready yet: {diag}");
+        }
+        let _ = ws.close(None).await;
+        return Ok(None);
+    }
+
+    let eval_str = if raw_eval.len() >= 16 {
+        Some(raw_eval.to_string())
+    } else {
+        if *last_logged_diag != "empty_eval" {
+            *last_logged_diag = "empty_eval".to_string();
+            crate::debug_log!(
+                "cdp",
+                "ServiceNow page probe returned empty/short value on '{page_url}'"
+            );
+        }
+        None
+    };
 
     // Do NOT proceed or close the browser unless `CDP_SESSION_PROBE_JS` confirmed an authenticated
     // non-guest ServiceNow session and extracted a valid `g_ck` (`X-UserToken`).
@@ -1516,6 +1637,12 @@ async fn probe_cdp_page_session(
         let _ = ws.close(None).await;
         return Ok(None);
     };
+
+    crate::debug_log!(
+        "cdp",
+        "ServiceNow page probe succeeded on '{page_url}': X-UserToken={}",
+        crate::log::redact_token(Some(&g_ck))
+    );
 
     // 2. Fetch all domain cookies via `Network.getCookies`
     let cookies_cmd = json!({
@@ -1554,6 +1681,11 @@ async fn probe_cdp_page_session(
     }
 
     if !has_sn_session_cookie || cookie_map.is_empty() {
+        crate::debug_log!(
+            "cdp",
+            "No ServiceNow session cookie (JSESSIONID / glide_user_route / glide_session_store) found yet among {} cookies",
+            cookie_map.len()
+        );
         let _ = ws.close(None).await;
         return Ok(None);
     }
@@ -1564,6 +1696,12 @@ async fn probe_cdp_page_session(
         .collect::<Vec<_>>()
         .join("; ");
 
+    crate::debug_log!(
+        "cdp",
+        "Captured ServiceNow session cookies: {}",
+        crate::log::summarize_cookie_names(&cookie_header)
+    );
+
     // 3. Close the isolated `--app` browser window cleanly
     let close_cmd = json!({
         "id": 3,
@@ -1572,6 +1710,7 @@ async fn probe_cdp_page_session(
     });
     let _ = ws.send(Message::Text(close_cmd.to_string().into())).await;
     let _ = ws.close(None).await;
+    crate::debug_log!("cdp", "Sent Browser.close to isolated SSO browser window");
 
     Ok(Some((cookie_header, Some(g_ck))))
 }
@@ -1653,6 +1792,15 @@ pub async fn execute_auth_login(
     let app_arg = format!("--app={}", resolved.instance_url.as_str());
     let user_data_arg = format!("--user-data-dir={}", profile_dir.display());
     let debug_port_arg = format!("--remote-debugging-port={cdp_port}");
+
+    crate::debug_log!(
+        "auth",
+        "Spawning isolated browser: exe='{}' args=['{}', '{}', '{}', '--remote-allow-origins=*', '--no-first-run', '--no-default-browser-check']",
+        browser_exe.display(),
+        app_arg,
+        user_data_arg,
+        debug_port_arg
+    );
 
     eprintln!(
         "Launching isolated SSO browser window for '{}' (profile '{}')...",

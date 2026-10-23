@@ -96,7 +96,8 @@ All subcommands accept the following global flags:
 - `--json`: Shorthand for `--output json`.
 - `--no-interactive`: Never prompt or auto-launch interactive SSO browser windows.
 - `--read-only` (env `SNCFR_READ_ONLY`): Enforce hard read-only lock for the invocation (rejects `--write` with exit code `6`).
-- `--verbose` (`-v`): Enable verbose diagnostic logging to `stderr`.
+- `--verbose` (`-v`, env `SNCFR_VERBOSE`): Enable verbose timestamped diagnostic logging to `stderr` (covering profile resolution, browser discovery, CDP session probing, Keychain storage, and HTTP request/response status).
+- `--log-file <path>` (env `SNCFR_LOG_FILE`): Append structured timestamped debug logs to `<path>`.
 
 ### 5.1 Ticket Prefix Auto-Resolution
 

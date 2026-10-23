@@ -3,10 +3,10 @@ use crate::config::ResolvedProfile;
 use crate::error::SncfrError;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName, HeaderValue, LOCATION};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// Capability token required at compile time to construct a [`MutatingClient`].
@@ -65,6 +65,24 @@ pub enum ClientAuth {
 }
 
 impl ClientAuth {
+    fn debug_summary(&self) -> String {
+        match self {
+            Self::SsoSession { cookie, user_token } => format!(
+                "sso-session ({}, X-UserToken={})",
+                crate::log::summarize_cookie_names(cookie),
+                crate::log::redact_token(user_token.as_deref())
+            ),
+            Self::ApiKey { header_name, token } => format!(
+                "api-key (header={header_name}, token={})",
+                crate::log::redact_token(Some(token))
+            ),
+            Self::Basic { username, .. } => format!("basic (username={username})"),
+            Self::Bearer { token } => {
+                format!("bearer (token={})", crate::log::redact_token(Some(token)))
+            }
+        }
+    }
+
     fn apply(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder, SncfrError> {
         match self {
             Self::SsoSession { cookie, user_token } => {
@@ -313,8 +331,20 @@ impl ReadOnlyClient {
         query: &[(&str, &str)],
     ) -> Result<T, SncfrError> {
         let url = self.endpoint_url(path)?;
+        crate::debug_log!(
+            "http",
+            "GET {url} query={query:?} auth=[{}]",
+            self.auth.debug_summary()
+        );
+        let started = Instant::now();
         let req = self.auth.apply(self.http.get(url).query(query))?;
         let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
+        crate::debug_log!(
+            "http",
+            "GET {path} -> HTTP {} ({}ms)",
+            resp.status(),
+            started.elapsed().as_millis()
+        );
         self.decode_json_response(resp, path).await
     }
 
@@ -325,11 +355,22 @@ impl ReadOnlyClient {
         query: &[(&str, &str)],
     ) -> Result<Vec<u8>, SncfrError> {
         let url = self.endpoint_url(path)?;
+        crate::debug_log!(
+            "http",
+            "GET (bytes) {url} query={query:?} auth=[{}]",
+            self.auth.debug_summary()
+        );
+        let started = Instant::now();
         let req = self
             .auth
             .apply(self.http.get(url).header(ACCEPT, "*/*").query(query))?;
         let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
         let status = resp.status();
+        crate::debug_log!(
+            "http",
+            "GET (bytes) {path} -> HTTP {status} ({}ms)",
+            started.elapsed().as_millis()
+        );
         if !status.is_success() {
             return Err(self.map_error_status(resp, path).await);
         }
@@ -340,9 +381,20 @@ impl ReadOnlyClient {
     /// Performs an authenticated `HEAD` request and returns the HTTP status code.
     pub async fn head(&self, path: &str, query: &[(&str, &str)]) -> Result<u16, SncfrError> {
         let url = self.endpoint_url(path)?;
+        crate::debug_log!(
+            "http",
+            "HEAD {url} query={query:?} auth=[{}]",
+            self.auth.debug_summary()
+        );
+        let started = Instant::now();
         let req = self.auth.apply(self.http.head(url).query(query))?;
         let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
         let status = resp.status();
+        crate::debug_log!(
+            "http",
+            "HEAD {path} -> HTTP {status} ({}ms)",
+            started.elapsed().as_millis()
+        );
         if status.as_u16() == 401 || status.is_redirection() {
             return Err(SncfrError::AuthExpired {
                 instance: self.base_url.as_str().trim_end_matches('/').to_string(),
@@ -360,6 +412,12 @@ impl ReadOnlyClient {
         requests: &[BatchGetSubRequest],
     ) -> Result<BatchResponse, SncfrError> {
         let url = self.endpoint_url("/api/now/batch")?;
+        let sub_ids: Vec<&str> = requests.iter().map(|r| r.id.as_str()).collect();
+        crate::debug_log!(
+            "http",
+            "POST {url} batch_id='{batch_request_id}' sub_requests={sub_ids:?} auth=[{}]",
+            self.auth.debug_summary()
+        );
         let envelope = WireBatchEnvelope {
             batch_request_id,
             rest_requests: requests
@@ -377,9 +435,26 @@ impl ReadOnlyClient {
                 .collect(),
         };
 
+        let started = Instant::now();
         let req = self.auth.apply(self.http.post(url).json(&envelope))?;
         let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
-        self.decode_json_response(resp, "/api/now/batch").await
+        crate::debug_log!(
+            "http",
+            "POST /api/now/batch -> HTTP {} ({}ms)",
+            resp.status(),
+            started.elapsed().as_millis()
+        );
+        let batch: BatchResponse = self.decode_json_response(resp, "/api/now/batch").await?;
+        for sub in &batch.serviced_requests {
+            crate::debug_log!(
+                "batch",
+                "Sub-request '{}' -> status={} time={:?}ms",
+                sub.id,
+                sub.status_code,
+                sub.execution_time
+            );
+        }
+        Ok(batch)
     }
 
     fn endpoint_url(&self, path: &str) -> Result<Url, SncfrError> {
@@ -440,13 +515,24 @@ impl ReadOnlyClient {
         let status = resp.status();
         let code = status.as_u16();
         let instance = self.base_url.as_str().trim_end_matches('/').to_string();
+        let location = resp
+            .headers()
+            .get(LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body_text = resp.text().await.unwrap_or_default();
+        let body_preview: String = body_text.chars().take(300).collect();
+
+        crate::debug_log!(
+            "http",
+            "Error response on '{resource}': HTTP {status} location={location:?} body_preview={body_preview:?}"
+        );
 
         // Redirects (301/302/307 to /login.do or IdP) or 401 indicate expired/invalid auth
         if code == 401 || status.is_redirection() {
             return SncfrError::AuthExpired { instance };
         }
 
-        let body_text = resp.text().await.unwrap_or_default();
         let sn_detail = extract_servicenow_error_detail(&body_text).unwrap_or_else(|| {
             status
                 .canonical_reason()

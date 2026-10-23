@@ -48,8 +48,18 @@ pub struct Cli {
     pub read_only: bool,
 
     /// Enable verbose diagnostic logging to stderr
-    #[arg(short, long, global = true)]
+    #[arg(
+        short,
+        long,
+        global = true,
+        env = "SNCFR_VERBOSE",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub verbose: bool,
+
+    /// Write detailed debug logs to a file (appends timestamped trace lines)
+    #[arg(long, global = true, env = "SNCFR_LOG_FILE")]
+    pub log_file: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Commands,

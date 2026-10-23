@@ -30,8 +30,9 @@ Replace `https://your-instance.service-now.com` with your actual ServiceNow URL 
 
 ### 1.1 Interactive Corporate SSO Login (`sncfr auth login`)
 ```bash
-sncfr auth login --instance https://your-instance.service-now.com --profile prod
+sncfr -v auth login --instance https://your-instance.service-now.com --profile prod
 ```
+*(Tip: Pass `-v` / `--verbose` or `--log-file /tmp/sncfr-debug.log` on any command to inspect real-time browser discovery, CDP session probing, Keychain reads/writes, and HTTP status codes.)*
 - **What to observe**:
   1. `sncfr` discovers your managed Chromium browser (Chrome, Edge, Brave, or Arc) and launches an isolated `--app` window with a dedicated profile (`~/.config/sncfr/browser-profile/`).
   2. Complete your corporate SSO login (Okta FastPass, Microsoft Entra Conditional Access, Ping, or SAML + MFA).

@@ -61,6 +61,11 @@ async fn main() -> ExitCode {
     };
 
     let output_format = cli.effective_output();
+    if let Err(err) = sncfr::log::init(cli.verbose, cli.log_file.as_deref()) {
+        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+        return err.exit_code();
+    }
+
     let mut config = match AppConfig::load_default() {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -70,6 +75,26 @@ async fn main() -> ExitCode {
     };
 
     let resolved_profile = config.resolve_profile(&cli).ok();
+    if let Some(prof) = &resolved_profile {
+        sncfr::debug_log!(
+            "config",
+            "Resolved profile '{}' -> instance={} (key={}, auth={}, read_only_locked={})",
+            prof.name,
+            prof.instance_url,
+            prof.instance_key,
+            prof.auth_method.as_str(),
+            prof.is_read_only_locked()
+        );
+    } else {
+        sncfr::debug_log!(
+            "config",
+            "No profile resolved yet (cli.profile={:?}, cli.instance={:?}, configured_profiles={})",
+            cli.profile,
+            cli.instance,
+            config.profiles.len()
+        );
+    }
+
     let (resolved_output, write_permit) =
         match validate_invocation(&cli, resolved_profile.as_ref(), is_stdout_tty) {
             Ok(res) => res,
@@ -78,6 +103,12 @@ async fn main() -> ExitCode {
                 return err.exit_code();
             }
         };
+    sncfr::debug_log!(
+        "cli",
+        "Validated invocation: resolved_output={:?}, write_permit={}",
+        resolved_output,
+        write_permit.is_some()
+    );
 
     match &cli.command {
         Commands::Auth(AuthCommands::Profiles) => {
