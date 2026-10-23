@@ -9,6 +9,7 @@ use sncfr::cache::InstanceCache;
 use sncfr::cli::{AuthCommands, AuthLoginArgs, Cli, Commands};
 use sncfr::config::AppConfig;
 use sncfr::doctor::{execute_doctor, format_doctor_report};
+use sncfr::dossier::{assemble_ticket_dossier, format_ticket_dossiers};
 use sncfr::error::SncfrError;
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
 use sncfr::validate_invocation;
@@ -255,6 +256,52 @@ async fn main() -> ExitCode {
                     return err.exit_code();
                 }
             }
+        }
+        Commands::Show(args) => {
+            let profile = match config.resolve_profile(&cli) {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let store = CredentialStore::default_store();
+            let cache = match InstanceCache::for_instance(&profile.instance_key) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let client = match resolve_authenticated_client(
+                &cli,
+                &mut config,
+                &profile,
+                &store,
+                is_stdin_tty,
+                is_stdout_tty,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+
+            let mut dossiers = Vec::with_capacity(args.tickets.len());
+            for ticket_id in &args.tickets {
+                match assemble_ticket_dossier(&client, &cache, args, ticket_id).await {
+                    Ok(d) => dossiers.push(d),
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                }
+            }
+            println!("{}", format_ticket_dossiers(&dossiers, resolved_output));
+            return ExitCode::SUCCESS;
         }
         _ => {}
     }
