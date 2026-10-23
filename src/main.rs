@@ -388,8 +388,15 @@ fn render_auth_login(summary: &AuthLoginSummary, format: ResolvedOutputFormat) {
         }
         _ => {
             println!(
-                "Authenticated via Corporate SSO for profile '{}' ({}) [browser: {}]",
-                summary.profile, summary.instance_url, summary.browser_executable
+                "Authenticated via Corporate SSO for profile '{}' ({}) [browser: {}, X-UserToken: {}]",
+                summary.profile,
+                summary.instance_url,
+                summary.browser_executable,
+                if summary.has_user_token {
+                    "present"
+                } else {
+                    "missing"
+                }
             );
         }
     }

@@ -609,6 +609,8 @@ pub fn extract_g_ck_from_html(html: &str) -> Option<String> {
     if html.contains("NOW.user.name = 'guest'")
         || html.contains("NOW.user.name=\"guest\"")
         || html.contains("\"user_name\":\"guest\"")
+        || html.contains("\"user_name\": \"guest\"")
+        || html.contains("5136503cc611227c0183e96598c4f706")
     {
         return None;
     }
@@ -619,15 +621,32 @@ pub fn extract_g_ck_from_html(html: &str) -> Option<String> {
         "window.g_ck=\"",
         "var g_ck = '",
         "var g_ck = \"",
+        "var g_ck='",
+        "var g_ck=\"",
         "\"g_ck\":\"",
+        "\"g_ck\": \"",
         "'g_ck':'",
+        "'g_ck': '",
+        "\"userToken\":\"",
+        "\"userToken\": \"",
+        "\"sessionToken\":\"",
+        "\"sessionToken\": \"",
+        "\"glide.security.csrf_token\":\"",
+        "\"glide.security.csrf_token\": \"",
+        "name=\"sysparm_ck\" value=\"",
+        "name='sysparm_ck' value='",
+        "id=\"sysparm_ck\" value=\"",
     ] {
         if let Some(idx) = html.find(pattern) {
             let rest = &html[idx + pattern.len()..];
             let end_quote = if pattern.ends_with('\'') { '\'' } else { '"' };
             if let Some(end_idx) = rest.find(end_quote) {
                 let candidate = rest[..end_idx].trim();
-                if candidate.len() >= 16 {
+                if candidate.len() >= 16
+                    && candidate.len() <= 160
+                    && !candidate.eq_ignore_ascii_case("true")
+                    && !candidate.eq_ignore_ascii_case("false")
+                {
                     return Some(candidate.to_string());
                 }
             }
@@ -1193,7 +1212,7 @@ pub async fn capture_session_via_cdp(
                 }
 
                 if let Ok(Some((cookie, g_ck))) =
-                    probe_cdp_page_session(ws_url, instance_url, &target_host).await
+                    probe_cdp_page_session(ws_url, instance_url, &target.url, &target_host).await
                 {
                     return Ok((cookie, g_ck));
                 }
@@ -1212,16 +1231,96 @@ const CDP_SESSION_PROBE_JS: &str = r#"
   const href = (window.location && window.location.href) || '';
   const p = ((window.location && window.location.pathname) || '').toLowerCase();
   if (
+    !href ||
+    href.startsWith('about:') ||
     p.includes('login') ||
     p.includes('saml_redirector') ||
     p.includes('logout') ||
     p.includes('auth_redirect') ||
     p.includes('external_logout') ||
     href.includes('SAMLRequest=') ||
+    href.includes('SAMLResponse=') ||
     href.includes('RelayState=')
   ) {
     return null;
   }
+
+  const isValidToken = (t) => {
+    if (typeof t !== 'string') return false;
+    const s = t.trim();
+    return s.length >= 16 && s.length <= 160 && !/^(true|false|null|undefined)$/i.test(s);
+  };
+
+  // Install passive X-UserToken sniffer on fetch and XMLHttpRequest in this window
+  const installSniffer = (w) => {
+    try {
+      if (!w || w.__sncfr_hooked) return;
+      w.__sncfr_hooked = true;
+      if (w.XMLHttpRequest && w.XMLHttpRequest.prototype) {
+        const origSetHeader = w.XMLHttpRequest.prototype.setRequestHeader;
+        w.XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+          try {
+            if (typeof name === 'string' && name.toLowerCase() === 'x-usertoken' && isValidToken(value)) {
+              window.__sncfr_captured_g_ck = value.trim();
+            }
+          } catch (_) {}
+          return origSetHeader.apply(this, arguments);
+        };
+      }
+      if (typeof w.fetch === 'function') {
+        const origFetch = w.fetch;
+        w.fetch = function(input, init) {
+          try {
+            const h = (init && init.headers) || (input && input.headers);
+            if (h) {
+              if (typeof h.get === 'function') {
+                const v = h.get('X-UserToken') || h.get('x-usertoken');
+                if (isValidToken(v)) window.__sncfr_captured_g_ck = v.trim();
+              } else if (typeof h === 'object') {
+                for (const k of Object.keys(h)) {
+                  if (k.toLowerCase() === 'x-usertoken' && isValidToken(h[k])) {
+                    window.__sncfr_captured_g_ck = h[k].trim();
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+          return origFetch.apply(this, arguments);
+        };
+      }
+    } catch (_) {}
+  };
+
+  const collectWindows = () => {
+    const wins = [window];
+    try {
+      if (window.frames) {
+        for (let i = 0; i < window.frames.length; i++) {
+          if (window.frames[i] && !wins.includes(window.frames[i])) {
+            wins.push(window.frames[i]);
+          }
+        }
+      }
+      const visitRoot = (root, depth) => {
+        if (!root || depth > 5) return;
+        const els = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (let i = 0; i < els.length; i++) {
+          const el = els[i];
+          if (el.tagName === 'IFRAME' && el.contentWindow && !wins.includes(el.contentWindow)) {
+            wins.push(el.contentWindow);
+          }
+          if (el.shadowRoot) {
+            visitRoot(el.shadowRoot, depth + 1);
+          }
+        }
+      };
+      visitRoot(document, 0);
+    } catch (_) {}
+    for (const w of wins) installSniffer(w);
+    return wins;
+  };
+
+  const wins = collectWindows();
 
   const GUEST_SYS_ID = '5136503cc611227c0183e96598c4f706';
   const isRealUser = (name, sysId) => {
@@ -1246,94 +1345,142 @@ const CDP_SESSION_PROBE_JS: &str = r#"
     return null;
   };
 
-  let authedUser = findUserInWin(window);
-  if (!authedUser && window.frames) {
-    for (let i = 0; i < window.frames.length; i++) {
-      authedUser = findUserInWin(window.frames[i]);
-      if (authedUser) break;
-    }
-  }
-
   const findTokenInWin = (w) => {
     try {
-      if (typeof w.g_ck === 'string' && w.g_ck.length >= 16) return w.g_ck;
-      if (w.NOW && typeof w.NOW.g_ck === 'string' && w.NOW.g_ck.length >= 16) return w.NOW.g_ck;
-      if (w.ux_globals && w.ux_globals.sysprops && typeof w.ux_globals.sysprops['glide.security.csrf_token'] === 'string') {
-        return w.ux_globals.sysprops['glide.security.csrf_token'];
+      if (isValidToken(w.__sncfr_captured_g_ck)) return w.__sncfr_captured_g_ck.trim();
+      if (isValidToken(w.g_ck)) return w.g_ck.trim();
+      if (w.NOW) {
+        if (isValidToken(w.NOW.g_ck)) return w.NOW.g_ck.trim();
+        if (isValidToken(w.NOW.session_token)) return w.NOW.session_token.trim();
+        if (isValidToken(w.NOW.user_token)) return w.NOW.user_token.trim();
       }
-      const inp = w.document && w.document.querySelector && w.document.querySelector('input[name="sysparm_ck"], #sysparm_ck');
-      if (inp && typeof inp.value === 'string' && inp.value.length >= 16) return inp.value;
+      if (w.ux_globals) {
+        if (isValidToken(w.ux_globals.g_ck)) return w.ux_globals.g_ck.trim();
+        if (isValidToken(w.ux_globals.sessionToken)) return w.ux_globals.sessionToken.trim();
+        if (w.ux_globals.sysprops && isValidToken(w.ux_globals.sysprops['glide.security.csrf_token'])) {
+          return w.ux_globals.sysprops['glide.security.csrf_token'].trim();
+        }
+      }
+      if (w.document && w.document.querySelector) {
+        const inp = w.document.querySelector('input[name="sysparm_ck"], #sysparm_ck');
+        if (inp && isValidToken(inp.value)) return inp.value.trim();
+        const meta = w.document.querySelector('meta[name="g_ck"]');
+        if (meta && isValidToken(meta.content)) return meta.content.trim();
+      }
     } catch (_) {}
     return null;
   };
 
-  let token = findTokenInWin(window);
-  if (!token && window.frames) {
-    for (let i = 0; i < window.frames.length; i++) {
-      token = findTokenInWin(window.frames[i]);
-      if (token) break;
-    }
-  }
-
   const extractFromText = (txt) => {
-    if (!txt || txt.includes("NOW.user.name = 'guest'") || txt.includes('"user_name":"guest"')) return null;
-    for (const pat of ["window.g_ck = '", 'window.g_ck = "', "window.g_ck='", 'window.g_ck="', "var g_ck = '", 'var g_ck = "', '"g_ck":"', "'g_ck':'"]) {
-      const idx = txt.indexOf(pat);
-      if (idx !== -1) {
-        const rest = txt.slice(idx + pat.length);
-        const q = pat[pat.length - 1];
-        const end = rest.indexOf(q);
-        if (end >= 16 && end <= 160) return rest.slice(0, end).trim();
+    if (!txt || typeof txt !== 'string') return null;
+    if (
+      txt.includes("NOW.user.name = 'guest'") ||
+      txt.includes('NOW.user.name="guest"') ||
+      txt.includes('"user_name":"guest"') ||
+      txt.includes('"user_name": "guest"') ||
+      txt.includes(GUEST_SYS_ID)
+    ) {
+      return null;
+    }
+    const regexes = [
+      /(?:window\.g_ck|var\s+g_ck)\s*=\s*['"]([0-9a-zA-Z._-]{16,160})['"]/,
+      /['"](?:g_ck|userToken|sessionToken|csrfToken|glide\.security\.csrf_token)['"]\s*:\s*['"]([0-9a-zA-Z._-]{16,160})['"]/,
+      /name=['"]sysparm_ck['"][^>]*value=['"]([0-9a-zA-Z._-]{16,160})['"]/,
+      /value=['"]([0-9a-zA-Z._-]{16,160})['"][^>]*name=['"]sysparm_ck['"]/,
+      /id=['"]sysparm_ck['"][^>]*value=['"]([0-9a-zA-Z._-]{16,160})['"]/
+    ];
+    for (const re of regexes) {
+      const m = txt.match(re);
+      if (m && isValidToken(m[1])) {
+        return m[1].trim();
       }
     }
     return null;
   };
 
-  // Verify via `/api/now/ui/user/current_user` if DOM globals didn't expose `NOW.user.name`
-  if (!authedUser && typeof fetch === 'function') {
+  let authedUser = null;
+  let token = null;
+  for (const w of wins) {
+    if (!authedUser) authedUser = findUserInWin(w);
+    if (!token) token = findTokenInWin(w);
+  }
+  if (!token && document && document.documentElement) {
+    token = extractFromText(document.documentElement.innerHTML);
+  }
+
+  const fetchTokenFromPages = async () => {
+    if (typeof fetch !== 'function') return null;
+    const urls = [
+      '/sys_user.do?sys_id=javascript:gs.getUserID()&sysparm_nostack=true',
+      '/welcome.do',
+      '/stats.do',
+      '/navpage.do',
+      '/now/nav/ui/home',
+      '/$sp.do'
+    ];
+    for (const url of urls) {
+      try {
+        const r = await fetch(url, { credentials: 'include' });
+        if (r.ok && !(r.url || '').toLowerCase().includes('login')) {
+          const hdrTok = r.headers && (r.headers.get('X-UserToken') || r.headers.get('x-usertoken'));
+          if (isValidToken(hdrTok)) return hdrTok.trim();
+          const txt = await r.text();
+          const extracted = extractFromText(txt);
+          if (isValidToken(extracted)) return extracted;
+        }
+      } catch (_) {}
+    }
+    return null;
+  };
+
+  if (!token && authedUser) {
+    token = await fetchTokenFromPages();
+  }
+
+  // Always verify session authenticity against `/api/now/ui/user/current_user` when `fetch` is available
+  if (typeof fetch === 'function') {
     try {
       const headers = { 'Accept': 'application/json' };
-      if (token) headers['X-UserToken'] = token;
+      if (isValidToken(token)) headers['X-UserToken'] = token;
       const r = await fetch('/api/now/ui/user/current_user', { credentials: 'include', headers });
-      if (r.ok && !(r.url || '').toLowerCase().includes('login')) {
+      if (r.status === 401 || r.status === 403 || (r.url || '').toLowerCase().includes('login')) {
+        return null;
+      }
+      if (r.ok) {
+        const hdrTok = r.headers && (r.headers.get('X-UserToken') || r.headers.get('x-usertoken'));
+        if (!token && isValidToken(hdrTok)) token = hdrTok.trim();
         const data = await r.json();
         const res = (data && data.result) || data || {};
-        const uName = res.user_name || res.userName || '';
-        const uSysId = res.user_sys_id || res.sys_id || '';
-        if (isRealUser(uName, uSysId)) {
-          authedUser = uName;
+        const uName = res.user_name || res.userName || res.name || '';
+        const uSysId = res.user_sys_id || res.sys_id || res.userID || '';
+        if (!isRealUser(uName, uSysId)) {
+          return null;
+        }
+        authedUser = uName;
+        if (!token) {
+          const bodyTok = res.user_token || res.g_ck || res.session_token;
+          if (isValidToken(bodyTok)) token = bodyTok.trim();
         }
       }
     } catch (_) {}
   }
 
-  // Never accept a session unless we have confirmed a real non-guest user is logged in
   if (!authedUser) {
     return null;
   }
 
-  if (!token && document && document.documentElement) {
-    token = extractFromText(document.documentElement.innerHTML);
+  if (!token) {
+    token = await fetchTokenFromPages();
   }
-  if (!token && typeof fetch === 'function') {
-    for (const url of ['/sys_user.do?sys_id=javascript:gs.getUserID()&sysparm_nostack=true', '/welcome.do', '/now/nav/ui/home', '/$sp.do']) {
-      try {
-        const r = await fetch(url, { credentials: 'include' });
-        if (r.ok && !(r.url || '').toLowerCase().includes('login')) {
-          const txt = await r.text();
-          token = extractFromText(txt);
-          if (token) break;
-        }
-      } catch (_) {}
-    }
-  }
-  return token || '__AUTHENTICATED_COOKIE_ONLY__';
+
+  return isValidToken(token) ? token : null;
 })()
 "#;
 
 async fn probe_cdp_page_session(
     ws_url: &str,
     instance_url: &Url,
+    page_url: &str,
     target_host: &str,
 ) -> Result<Option<(String, Option<String>)>, SncfrError> {
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
@@ -1359,16 +1506,15 @@ async fn probe_cdp_page_session(
     let eval_str = eval_resp
         .pointer("/result/result/value")
         .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tok| tok.len() >= 16)
         .map(str::to_string);
 
-    let mut is_authenticated_cookie_only = false;
-    let mut g_ck = match eval_str.as_deref() {
-        Some("__AUTHENTICATED_COOKIE_ONLY__") => {
-            is_authenticated_cookie_only = true;
-            None
-        }
-        Some(tok) if tok.len() >= 16 => Some(tok.to_string()),
-        _ => None,
+    // Do NOT proceed or close the browser unless `CDP_SESSION_PROBE_JS` confirmed an authenticated
+    // non-guest ServiceNow session and extracted a valid `g_ck` (`X-UserToken`).
+    let Some(g_ck) = eval_str else {
+        let _ = ws.close(None).await;
+        return Ok(None);
     };
 
     // 2. Fetch all domain cookies via `Network.getCookies`
@@ -1376,7 +1522,7 @@ async fn probe_cdp_page_session(
         "id": 2,
         "method": "Network.getCookies",
         "params": {
-            "urls": [instance_url.as_str()]
+            "urls": [instance_url.as_str(), page_url]
         }
     });
     let _ = ws.send(Message::Text(cookies_cmd.to_string().into())).await;
@@ -1388,9 +1534,12 @@ async fn probe_cdp_page_session(
         .unwrap_or(Value::Array(Vec::new()));
     let cdp_cookies: Vec<CdpCookie> = serde_json::from_value(cookies_val).unwrap_or_default();
 
-    let mut pairs = Vec::new();
+    let mut cookie_map: BTreeMap<String, String> = BTreeMap::new();
     let mut has_sn_session_cookie = false;
     for c in cdp_cookies {
+        if c.value.is_empty() {
+            continue;
+        }
         let domain_clean = c.domain.trim_start_matches('.').to_lowercase();
         if !domain_clean.is_empty() && !target_host.ends_with(&domain_clean) {
             continue;
@@ -1398,31 +1547,22 @@ async fn probe_cdp_page_session(
         if matches!(
             c.name.as_str(),
             "JSESSIONID" | "glide_user_route" | "glide_session_store" | "glide_user_activity"
-        ) && !c.value.is_empty()
-        {
+        ) {
             has_sn_session_cookie = true;
         }
-        pairs.push(format!("{}={}", c.name, c.value));
+        cookie_map.insert(c.name, c.value);
     }
 
-    if !has_sn_session_cookie || pairs.is_empty() {
+    if !has_sn_session_cookie || cookie_map.is_empty() {
         let _ = ws.close(None).await;
         return Ok(None);
     }
 
-    let cookie_header = pairs.join("; ");
-
-    // If `window.g_ck` wasn't directly on the top frame, try fetching it via the session cookie
-    if g_ck.is_none()
-        && let Ok(Some(fetched)) = fetch_g_ck_with_cookie(instance_url, &cookie_header).await
-    {
-        g_ck = Some(fetched);
-    }
-
-    if g_ck.is_none() && !is_authenticated_cookie_only {
-        let _ = ws.close(None).await;
-        return Ok(None);
-    }
+    let cookie_header = cookie_map
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ");
 
     // 3. Close the isolated `--app` browser window cleanly
     let close_cmd = json!({
@@ -1433,7 +1573,7 @@ async fn probe_cdp_page_session(
     let _ = ws.send(Message::Text(close_cmd.to_string().into())).await;
     let _ = ws.close(None).await;
 
-    Ok(Some((cookie_header, g_ck)))
+    Ok(Some((cookie_header, Some(g_ck))))
 }
 
 async fn read_cdp_response_by_id<S>(ws: &mut S, expected_id: u64) -> Result<Value, SncfrError>
@@ -1566,6 +1706,10 @@ pub async fn execute_auth_login(
     );
     store.save(&resolved.instance_key, &creds)?;
 
+    if let Ok(cache) = InstanceCache::for_instance(&resolved.instance_key) {
+        let _ = fs::remove_file(cache.dir().join("identity.json"));
+    }
+
     config.upsert_profile(&profile_name, &resolved.instance_url, AuthMethod::Sso);
     if let Ok(cfg_path) = default_config_path() {
         let _ = config.save_to_path(&cfg_path);
@@ -1648,6 +1792,8 @@ pub async fn resolve_current_identity(
     cache: &InstanceCache,
     force_refresh: bool,
 ) -> Result<CachedIdentity, SncfrError> {
+    const GUEST_SYS_ID: &str = "5136503cc611227c0183e96598c4f706";
+
     if !force_refresh && let Ok(Some(cached)) = cache.read_identity() {
         return Ok(cached);
     }
@@ -1661,6 +1807,7 @@ pub async fn resolve_current_identity(
     ];
 
     let mut resolved_user: Option<(String, String, String, Option<String>)> = None;
+    let mut table_auth_err = false;
     match client
         .get_json::<Value>("/api/now/table/sys_user", &sys_user_query)
         .await
@@ -1674,45 +1821,61 @@ pub async fn resolve_current_identity(
             {
                 let user_name =
                     extract_field_value(first, "user_name").unwrap_or_else(|| sys_id.clone());
-                let display_name =
-                    extract_field_display(first, "name").unwrap_or_else(|| user_name.clone());
-                let email = extract_field_value(first, "email");
-                resolved_user = Some((sys_id, user_name, display_name, email));
+                if sys_id != GUEST_SYS_ID && !user_name.eq_ignore_ascii_case("guest") {
+                    let display_name =
+                        extract_field_display(first, "name").unwrap_or_else(|| user_name.clone());
+                    let email = extract_field_value(first, "email");
+                    resolved_user = Some((sys_id, user_name, display_name, email));
+                }
             }
         }
         Err(SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. }) => {
-            return Err(SncfrError::AuthExpired {
-                instance: client.base_url().as_str().trim_end_matches('/').to_string(),
-            });
+            table_auth_err = true;
         }
         Err(_) => {
             // Fall through to `/api/now/ui/user/current_user` if `sys_user` is ACL-restricted
         }
     }
 
-    // 2. Fallback to `/api/now/ui/user/current_user` if `sys_user` was empty or 403 Forbidden
+    // 2. Fallback to `/api/now/ui/user/current_user` if `sys_user` was empty, 403 Forbidden, or restricted
     if resolved_user.is_none() {
-        let ui_resp: Value = client
-            .get_json("/api/now/ui/user/current_user", &[])
-            .await?;
+        let ui_resp: Value = match client.get_json("/api/now/ui/user/current_user", &[]).await {
+            Ok(v) => v,
+            Err(_) if table_auth_err => {
+                return Err(SncfrError::AuthExpired {
+                    instance: client.base_url().as_str().trim_end_matches('/').to_string(),
+                });
+            }
+            Err(e) => return Err(e),
+        };
         let res = ui_resp.get("result").unwrap_or(&ui_resp);
         let sys_id = res
             .get("user_sys_id")
+            .or_else(|| res.get("sys_id"))
+            .or_else(|| res.get("userID"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && *s != GUEST_SYS_ID)
             .ok_or_else(|| SncfrError::AuthExpired {
                 instance: client.base_url().as_str().trim_end_matches('/').to_string(),
             })?
             .to_string();
         let user_name = res
             .get("user_name")
+            .or_else(|| res.get("userName"))
+            .or_else(|| res.get("name"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("guest"))
             .unwrap_or(&sys_id)
             .to_string();
         let display_name = res
             .get("user_display_name")
+            .or_else(|| res.get("display_name"))
+            .or_else(|| res.get("displayName"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or(&user_name)
             .to_string();
         resolved_user = Some((sys_id, user_name, display_name, None));
