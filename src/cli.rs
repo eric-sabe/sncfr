@@ -39,7 +39,12 @@ pub struct Cli {
     pub no_interactive: bool,
 
     /// Enforce hard read-only lock for this invocation (rejects `--write` with exit code 6)
-    #[arg(long, global = true, env = "SNCFR_READ_ONLY")]
+    #[arg(
+        long,
+        global = true,
+        env = "SNCFR_READ_ONLY",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub read_only: bool,
 
     /// Enable verbose diagnostic logging to stderr

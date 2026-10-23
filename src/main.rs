@@ -6,7 +6,9 @@ use sncfr::auth::{
     execute_auth_status, resolve_authenticated_client,
 };
 use sncfr::cache::InstanceCache;
-use sncfr::cli::{ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands};
+use sncfr::cli::{
+    ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands, SkillCommands,
+};
 use sncfr::client::ReadOnlyClient;
 use sncfr::config::{AppConfig, ResolvedProfile};
 use sncfr::doctor::{execute_doctor, format_doctor_report};
@@ -21,6 +23,7 @@ use sncfr::mutate::{
 };
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
 use sncfr::schema::{execute_schema, format_schema};
+use sncfr::skill::{format_skill_install, generate_skill_markdown, install_skill_markdown};
 use sncfr::validate_invocation;
 use sncfr::workflows::{
     execute_approval_action, execute_approvals_list, execute_approvals_show, execute_catalog_order,
@@ -641,10 +644,28 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        _ => {}
+        Commands::Skill(subcmd) => match subcmd {
+            SkillCommands::Print => {
+                print!(
+                    "{}",
+                    generate_skill_markdown(&config, resolved_profile.as_ref())
+                );
+                return ExitCode::SUCCESS;
+            }
+            SkillCommands::Install { path } => {
+                match install_skill_markdown(path, &config, resolved_profile.as_ref()) {
+                    Ok(summary) => {
+                        println!("{}", format_skill_install(&summary, resolved_output));
+                        return ExitCode::SUCCESS;
+                    }
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                }
+            }
+        },
     }
-
-    ExitCode::SUCCESS
 }
 
 async fn prepare_read_context(

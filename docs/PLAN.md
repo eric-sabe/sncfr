@@ -1,6 +1,6 @@
 # `sncfr` Implementation Plan & Roadmap
 
-- **Status**: Active Roadmap
+- **Status**: Completed (Milestones 0–5 Delivered)
 - **Last Updated**: 2026-10-22
 - **Governing Spec**: [`docs/SPEC.md`](SPEC.md)
 - **GitHub Repository**: [`eric-sabe/sncfr`](https://github.com/eric-sabe/sncfr) (Private)
@@ -69,7 +69,7 @@
 
 ---
 
-## [Milestone 5: Agent Skill Generator (`sncfr skill`) & E2E Verification](https://github.com/eric-sabe/sncfr/milestone/5)
+## [Milestone 5: Agent Skill Generator (`sncfr skill`) & E2E Verification](https://github.com/eric-sabe/sncfr/milestone/5) (Completed)
 
-- [ ] **[#15 — M5.1: Implement instance-aware `sncfr skill <print|install>` generator and `wiremock` E2E test suite](https://github.com/eric-sabe/sncfr/issues/15)**
+- [x] **[#15 — M5.1: Implement instance-aware `sncfr skill <print|install>` generator and `wiremock` E2E test suite](https://github.com/eric-sabe/sncfr/issues/15)**
   - Tailored `SKILL.md` generator/installer and comprehensive `wiremock` integration test suite.
