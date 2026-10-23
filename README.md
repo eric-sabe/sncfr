@@ -18,29 +18,61 @@ An agent-friendly, **read-only-by-default** Rust CLI for non-admin ServiceNow us
 
 ---
 
-## Installation & Building from Source
+## Installation
 
-### Prerequisites
-- **Rust**: 1.85+ (Rust 2024 Edition)
-- **OS Keychain Dependencies**:
-  - **macOS**: Native Keychain works out of the box.
-  - **Windows**: Native Credential Manager works out of the box.
-  - **Linux**: Requires `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu: `sudo apt-get install pkg-config libdbus-1-dev`).
+### Step 0: Install Rust (if you don't already have `cargo`)
 
-### Compile & Install
+`sncfr` is compiled with the standard Rust toolchain (**Rust 1.85+**, 2024 Edition). If `cargo --version` is not found on your machine:
+
+- **macOS / Linux**:
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  source "$HOME/.cargo/env"
+  ```
+- **Windows**: Download and run [`rustup-init.exe`](https://rustup.rs/).
+- **Linux Only (OS Keyring dependency)**: Install `pkg-config` and `libdbus` headers before building:
+  ```bash
+  # Debian / Ubuntu
+  sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev
+  ```
+  *(macOS Keychain and Windows Credential Manager work out of the box with no extra packages.)*
+
+---
+
+### Option A: Install the CLI Directly (Recommended for Users)
+
+If you just want the `sncfr` command on your `PATH` without managing a local Git checkout:
 
 ```bash
-# Install directly from GitHub into ~/.cargo/bin
 cargo install --git https://github.com/eric-sabe/sncfr.git
+```
 
-# Or clone and build locally
+Cargo will download the source, compile an optimized release binary, and install it to `~/.cargo/bin/sncfr`. Verify it works:
+
+```bash
+sncfr --version
+sncfr --help
+```
+
+> [!TIP]
+> If your shell says `command not found: sncfr`, add `~/.cargo/bin` to your shell profile (`export PATH="$HOME/.cargo/bin:$PATH"` in `~/.zshrc` or `~/.bashrc`) and open a new terminal.
+
+---
+
+### Option B: Clone & Build from Source (For Local Development & Testing)
+
+If you want to inspect the code, run the test suite, or modify `sncfr` locally:
+
+```bash
+# 1. Clone the repository
 git clone https://github.com/eric-sabe/sncfr.git
 cd sncfr
 
-# Build optimized release binary (./target/release/sncfr)
+# 2a. Compile an optimized binary at ./target/release/sncfr
 cargo build --release
+./target/release/sncfr --version
 
-# Or install the local checkout into ~/.cargo/bin
+# 2b. (Optional) Install your local checkout into ~/.cargo/bin/sncfr
 cargo install --path .
 ```
 
