@@ -54,6 +54,12 @@ sncfr --version
 sncfr --help
 ```
 
+To upgrade to the latest commit on another machine later, re-run the same command (add `--force` to rebuild even if the version number hasn't changed):
+
+```bash
+cargo install --git https://github.com/eric-sabe/sncfr.git --force
+```
+
 > [!TIP]
 > If your shell says `command not found: sncfr`, add `~/.cargo/bin` to your shell profile (`export PATH="$HOME/.cargo/bin:$PATH"` in `~/.zshrc` or `~/.bashrc`) and open a new terminal.
 
