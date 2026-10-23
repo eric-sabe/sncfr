@@ -606,6 +606,12 @@ fn tokenize_shell_words(input: &str) -> Vec<String> {
 
 /// Extracts `g_ck` (`X-UserToken`) from ServiceNow HTML or inline script blocks.
 pub fn extract_g_ck_from_html(html: &str) -> Option<String> {
+    if html.contains("NOW.user.name = 'guest'")
+        || html.contains("NOW.user.name=\"guest\"")
+        || html.contains("\"user_name\":\"guest\"")
+    {
+        return None;
+    }
     for pattern in [
         "window.g_ck = '",
         "window.g_ck = \"",
@@ -961,11 +967,17 @@ pub async fn capture_session_via_cdp(
                 let Some(ws_url) = target.web_socket_debugger_url.as_deref() else {
                     continue;
                 };
-                // Only inspect pages once navigation has landed on (or returned to) the ServiceNow instance host
-                let is_on_instance = Url::parse(&target.url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(str::to_lowercase))
-                    .is_some_and(|h| h == target_host);
+                // Only inspect pages once navigation has landed on (or returned to) an authenticated ServiceNow page
+                let is_on_instance = Url::parse(&target.url).ok().is_some_and(|u| {
+                    let host_ok = u
+                        .host_str()
+                        .is_some_and(|h| h.eq_ignore_ascii_case(&target_host));
+                    let path_lower = u.path().to_ascii_lowercase();
+                    let is_login_or_redirect = path_lower.contains("login.do")
+                        || path_lower.contains("saml_redirector.do")
+                        || path_lower.contains("logout");
+                    host_ok && !is_login_or_redirect
+                });
                 if !is_on_instance {
                     continue;
                 }
@@ -998,12 +1010,12 @@ async fn probe_cdp_page_session(
             remediation: None,
         })?;
 
-    // 1. Evaluate `window.g_ck`
+    // 1. Evaluate `window.g_ck` (ignoring unauthenticated login/redirect pages and `guest` sessions)
     let eval_cmd = json!({
         "id": 1,
         "method": "Runtime.evaluate",
         "params": {
-            "expression": "typeof window.g_ck === 'string' && window.g_ck.length >= 16 ? window.g_ck : null",
+            "expression": "(() => { const p = (window.location && window.location.pathname) || ''; if (p.includes('login.do') || p.includes('saml_redirector.do') || p.includes('logout')) return null; if (window.NOW && window.NOW.user && window.NOW.user.name === 'guest') return null; const tok = window.g_ck || (window.NOW && window.NOW.g_ck); return (typeof tok === 'string' && tok.length >= 16) ? tok : null; })()",
             "returnByValue": true
         }
     });

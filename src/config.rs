@@ -336,7 +336,7 @@ impl AppConfig {
                     read_only_lock_reason,
                     views: profile_cfg.views.clone(),
                 });
-            } else if cli.profile.is_some() {
+            } else if cli.profile.is_some() && cli.instance.is_none() {
                 let available: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
                 let remediation = if available.is_empty() {
                     "No profiles are configured in `~/.config/sncfr/config.toml`. Run `sncfr auth login --instance <instance>`.".to_string()
@@ -350,7 +350,7 @@ impl AppConfig {
             }
         }
 
-        // Fallback: ad-hoc profile when `--instance` / `SNCFR_INSTANCE` is supplied directly
+        // Fallback: new or ad-hoc profile when `--instance` / `SNCFR_INSTANCE` is supplied directly
         if let Some(raw_instance) = cli.instance.as_deref() {
             let (instance_url, instance_key) = normalize_instance_url(raw_instance)?;
             let read_only_lock_reason = if cli.read_only {
@@ -359,7 +359,7 @@ impl AppConfig {
                 None
             };
             return Ok(ResolvedProfile {
-                name: "adhoc".to_string(),
+                name: cli.profile.clone().unwrap_or_else(|| "adhoc".to_string()),
                 instance_url,
                 instance_key,
                 auth_method: AuthMethod::Sso,
@@ -485,5 +485,22 @@ team-triage = { table = "incident", query = "assignment_group.name=Cloud Platfor
         assert_eq!(resolved.name, "adhoc");
         assert_eq!(resolved.instance_key, "pdi99999.service-now.com");
         assert!(!resolved.is_read_only_locked());
+
+        // Passing both `--profile <new_name>` and `--instance <url>` succeeds for initial `auth login`
+        let new_profile_cli = Cli::try_parse_from([
+            "sncfr",
+            "auth",
+            "login",
+            "--instance",
+            "https://acme.service-now.com",
+            "--profile",
+            "prod",
+        ])
+        .expect("parse auth login with new profile");
+        let new_resolved = empty
+            .resolve_profile(&new_profile_cli)
+            .expect("resolve new profile with explicit instance");
+        assert_eq!(new_resolved.name, "prod");
+        assert_eq!(new_resolved.instance_key, "acme.service-now.com");
     }
 }
