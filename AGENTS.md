@@ -22,6 +22,7 @@
 
 - [`docs/SPEC.md`](docs/SPEC.md) — Authoritative product and technical specification for `sncfr`.
 - [`docs/PLAN.md`](docs/PLAN.md) — Phased implementation roadmap, milestones, and current status tracker.
+- [`docs/TESTING.md`](docs/TESTING.md) — Step-by-step functional testing & live instance smoke-test guide.
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records (ADRs) capturing the rationale behind core design choices:
   - [`docs/adr/0001-cdp-isolated-browser-sso.md`](docs/adr/0001-cdp-isolated-browser-sso.md) — Corporate SSO via CDP-driven isolated managed browser window + OS Keychain.
   - [`docs/adr/0002-read-only-default-validated-dry-run.md`](docs/adr/0002-read-only-default-validated-dry-run.md) — Compile-time Read-Only safety gate & Validated Dry-Run Previews.

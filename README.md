@@ -20,6 +20,7 @@ We manage our intent through living specs and plans in this repository:
 - [`AGENTS.md`](AGENTS.md) — First Principles & contributor rules.
 - [`docs/SPEC.md`](docs/SPEC.md) — Authoritative product and technical specification.
 - [`docs/PLAN.md`](docs/PLAN.md) — Phased implementation roadmap, GitHub Milestones, and status tracker.
+- [`docs/TESTING.md`](docs/TESTING.md) — Step-by-step functional testing and live Corporate SSO smoke-test guide.
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records:
   - [ADR-0001: Corporate SSO via CDP-Driven Isolated Managed Browser Window](docs/adr/0001-cdp-isolated-browser-sso.md)
   - [ADR-0002: Compile-Time Read-Only Default and Validated Dry-Run Previews](docs/adr/0002-read-only-default-validated-dry-run.md)
