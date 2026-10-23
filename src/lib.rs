@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod dossier;
 pub mod error;
 pub mod list;
+pub mod monitor;
 pub mod output;
 pub mod query;
 pub mod resolve;

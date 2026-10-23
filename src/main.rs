@@ -13,6 +13,9 @@ use sncfr::doctor::{execute_doctor, format_doctor_report};
 use sncfr::dossier::{assemble_ticket_dossier, format_ticket_dossiers};
 use sncfr::error::SncfrError;
 use sncfr::list::{execute_list, execute_search, execute_table, format_record_list};
+use sncfr::monitor::{
+    execute_attachments, execute_feed, execute_stats, format_attachments, format_feed, format_stats,
+};
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
 use sncfr::validate_invocation;
 use std::io::IsTerminal;
@@ -335,6 +338,66 @@ async fn main() -> ExitCode {
             match execute_table(&client, &cache, args).await {
                 Ok(env) => {
                     println!("{}", format_record_list(&env, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Stats(args) => {
+            let (profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_stats(&profile, &client, &cache, args).await {
+                Ok(env) => {
+                    println!("{}", format_stats(&env, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Feed(args) => {
+            let (profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_feed(&profile, &client, &cache, args).await {
+                Ok(env) => {
+                    println!("{}", format_feed(&env, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Attachments(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_attachments(&client, &cache, args).await {
+                Ok(env) => {
+                    println!("{}", format_attachments(&env, resolved_output));
                     return ExitCode::SUCCESS;
                 }
                 Err(err) => {
