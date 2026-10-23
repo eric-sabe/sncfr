@@ -7,10 +7,12 @@ use sncfr::auth::{
 };
 use sncfr::cache::InstanceCache;
 use sncfr::cli::{AuthCommands, AuthLoginArgs, Cli, Commands};
-use sncfr::config::AppConfig;
+use sncfr::client::ReadOnlyClient;
+use sncfr::config::{AppConfig, ResolvedProfile};
 use sncfr::doctor::{execute_doctor, format_doctor_report};
 use sncfr::dossier::{assemble_ticket_dossier, format_ticket_dossiers};
 use sncfr::error::SncfrError;
+use sncfr::list::{execute_list, execute_search, execute_table, format_record_list};
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
 use sncfr::validate_invocation;
 use std::io::IsTerminal;
@@ -258,38 +260,16 @@ async fn main() -> ExitCode {
             }
         }
         Commands::Show(args) => {
-            let profile = match config.resolve_profile(&cli) {
-                Ok(p) => p,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let store = CredentialStore::default_store();
-            let cache = match InstanceCache::for_instance(&profile.instance_key) {
-                Ok(c) => c,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
-            let client = match resolve_authenticated_client(
-                &cli,
-                &mut config,
-                &profile,
-                &store,
-                is_stdin_tty,
-                is_stdout_tty,
-            )
-            .await
-            {
-                Ok(c) => c,
-                Err(err) => {
-                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
-                    return err.exit_code();
-                }
-            };
+            let (profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
 
+            let _ = profile;
             let mut dossiers = Vec::with_capacity(args.tickets.len());
             for ticket_id in &args.tickets {
                 match assemble_ticket_dossier(&client, &cache, args, ticket_id).await {
@@ -303,10 +283,85 @@ async fn main() -> ExitCode {
             println!("{}", format_ticket_dossiers(&dossiers, resolved_output));
             return ExitCode::SUCCESS;
         }
+        Commands::List(args) => {
+            let (profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_list(&profile, &client, &cache, args).await {
+                Ok(env) => {
+                    println!("{}", format_record_list(&env, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Search(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_search(&client, &cache, args).await {
+                Ok(env) => {
+                    println!("{}", format_record_list(&env, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Table(args) => {
+            let (_profile, cache, client) =
+                match prepare_read_context(&cli, &mut config, is_stdin_tty, is_stdout_tty).await {
+                    Ok(ctx) => ctx,
+                    Err(err) => {
+                        eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                        return err.exit_code();
+                    }
+                };
+            match execute_table(&client, &cache, args).await {
+                Ok(env) => {
+                    println!("{}", format_record_list(&env, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
         _ => {}
     }
 
     ExitCode::SUCCESS
+}
+
+async fn prepare_read_context(
+    cli: &Cli,
+    config: &mut AppConfig,
+    is_stdin_tty: bool,
+    is_stdout_tty: bool,
+) -> Result<(ResolvedProfile, InstanceCache, ReadOnlyClient), SncfrError> {
+    let profile = config.resolve_profile(cli)?;
+    let store = CredentialStore::default_store();
+    let cache = InstanceCache::for_instance(&profile.instance_key)?;
+    let client =
+        resolve_authenticated_client(cli, config, &profile, &store, is_stdin_tty, is_stdout_tty)
+            .await?;
+    Ok((profile, cache, client))
 }
 
 fn render_auth_status(summary: &AuthStatusSummary, format: ResolvedOutputFormat) {
