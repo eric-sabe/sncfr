@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod error;
 pub mod output;
 pub mod query;
+pub mod resolve;
 
 use crate::cli::Cli;
 use crate::client::WritePermit;

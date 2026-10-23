@@ -47,7 +47,7 @@
 
 ## [Milestone 3: Ticket Resolution, Dossier (`show`), & Queue Exploration](https://github.com/eric-sabe/sncfr/milestone/3)
 
-- [ ] **[#8 — M3.1: Implement ticket prefix auto-resolver (`sys_number` cache + built-in ITIL prefixes + `task` fallback)](https://github.com/eric-sabe/sncfr/issues/8)**
+- [x] **[#8 — M3.1: Implement ticket prefix auto-resolver (`sys_number` cache + built-in ITIL prefixes + `task` fallback)](https://github.com/eric-sabe/sncfr/issues/8)**
   - Resolve `INC`, `RITM`, `SCTASK`, `REQ`, `CHG`, `PRB`, `CS`, custom `sys_number` prefixes, and fallback `task` lookups.
 - [ ] **[#9 — M3.2: Implement `/api/now/batch` client and `sncfr show <TICKET>` Ticket Dossier with graceful ACL degradation](https://github.com/eric-sabe/sncfr/issues/9)**
   - Single-roundtrip Ticket Dossier assembling core fields, non-empty `u_*`/`x_*` custom fields, Service Catalog variables, chronological `sys_journal_field` entries (with inline fallback on `403`), related hierarchy/approvals, and attachments.
