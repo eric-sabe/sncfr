@@ -20,8 +20,9 @@ Meanwhile, raw Table API responses return 100+ columns (mostly empty or internal
    - `sncfr show <TICKET>` bundles the ticket record query (`sysparm_display_value=all`), journal query, catalog variable query, related task/approval queries, and attachment metadata query into a single `/api/now/batch` HTTP request.
 2. **Curated Core Fields + Automatic Non-Empty Custom Fields (`u_*`, `x_*`)**:
    - Omit empty and noisy system columns by default, while automatically surfacing any non-empty custom instance fields (`u_*` and `x_*`) so organization-specific context is never hidden.
-3. **Graceful Partial ACL Degradation**:
+3. **Graceful Partial ACL & Batch Endpoint Degradation**:
    - Evaluate each sub-response in the `/api/now/batch` payload independently.
+   - If `/api/now/batch` itself is restricted or unavailable on the instance, automatically fall back to executing the `GET` sub-requests concurrently via standard Table API `GET` calls and wrap them in the same `ServicedSubResponse` envelope.
    - If a sub-request returns `403 Forbidden` (e.g., `sys_journal_field`), fall back to inline `comments_and_work_notes` / `comments` from the main ticket record and annotate the restricted section rather than failing the entire command.
 
 ## Consequences

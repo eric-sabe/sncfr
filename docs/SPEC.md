@@ -109,7 +109,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 ### 5.2 Top-Level Exploration & Monitoring Commands (Read-Only)
 
 - **`sncfr show <TICKET>... [flags]`** (alias: `view`, `get`)
-  - Assembles a complete **Ticket Dossier** via a single `/api/now/batch` request:
+  - Assembles a complete **Ticket Dossier** via a single `/api/now/batch` request (automatically falling back to concurrent `GET` requests if `/api/now/batch` is ACL-restricted on the instance):
     1. **Core & Custom Fields**: Curated core fields (`number`, `state`, `priority`, `urgency`, `impact`, `short_description`, `description`, `opened_by`, `caller_id`/`requested_for`, `assignment_group`, `assigned_to`, `sys_created_on`, `sys_updated_on`, `close_code`, `close_notes`, etc.) **plus all non-empty custom fields (`u_*`, `x_*`)** with `sysparm_display_value=all`.
     2. **Catalog Variables (for `sc_req_item` / `sc_task`)**: Queries `sc_item_option_mtom` $\to$ `sc_item_option` to render the question/answer pairs submitted on the Service Catalog form.
     3. **Chronological Activity Stream (`comments` & `work_notes`)**: Queries `sys_journal_field` (`element_id=<sys_id>^ORDERBYsys_created_on`) to render customer-visible comments and internal work notes in chronological order. If `sys_journal_field` returns `403 Forbidden`, gracefully falls back to parsing inline `comments_and_work_notes` / `comments` display values.

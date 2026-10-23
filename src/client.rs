@@ -166,7 +166,7 @@ struct WireBatchEnvelope<'a> {
 struct WireBatchGetItem<'a> {
     id: &'a str,
     method: &'static str,
-    url: &'a str,
+    url: String,
     exclude_response_headers: bool,
     headers: [WireBatchHeader; 1],
 }
@@ -184,7 +184,7 @@ pub struct BatchResponse {
     #[serde(default)]
     pub serviced_requests: Vec<ServicedSubResponse>,
     #[serde(default)]
-    pub unserviced_requests: Vec<String>,
+    pub unserviced_requests: Vec<serde_json::Value>,
 }
 
 impl BatchResponse {
@@ -425,7 +425,7 @@ impl ReadOnlyClient {
                 .map(|r| WireBatchGetItem {
                     id: &r.id,
                     method: "GET",
-                    url: &r.url,
+                    url: sanitize_batch_sub_url(&r.url),
                     exclude_response_headers: true,
                     headers: [WireBatchHeader {
                         name: "Accept".to_string(),
@@ -444,7 +444,18 @@ impl ReadOnlyClient {
             resp.status(),
             started.elapsed().as_millis()
         );
-        let batch: BatchResponse = self.decode_json_response(resp, "/api/now/batch").await?;
+        let raw_val: serde_json::Value = self.decode_json_response(resp, "/api/now/batch").await?;
+        let target_val = raw_val
+            .get("result")
+            .filter(|v| v.is_object())
+            .unwrap_or(&raw_val);
+        let batch: BatchResponse = serde_json::from_value(target_val.clone()).map_err(|e| {
+            SncfrError::NetworkOrInstance {
+                message: format!("Failed to parse BatchResponse from '/api/now/batch': {e}"),
+                status: Some(200),
+                remediation: None,
+            }
+        })?;
         for sub in &batch.serviced_requests {
             crate::debug_log!(
                 "batch",
@@ -455,6 +466,97 @@ impl ReadOnlyClient {
             );
         }
         Ok(batch)
+    }
+
+    /// Executes multiple read-only (`GET`) sub-requests via `/api/now/batch`, automatically degrading
+    /// to concurrent individual `GET` requests if `/api/now/batch` is ACL-restricted or unavailable on the instance.
+    pub async fn batch_get_with_fallback(
+        &self,
+        batch_request_id: &str,
+        requests: &[BatchGetSubRequest],
+    ) -> Result<BatchResponse, SncfrError> {
+        match self.batch_get(batch_request_id, requests).await {
+            Ok(batch) => Ok(batch),
+            Err(SncfrError::AuthExpired { instance }) => Err(SncfrError::AuthExpired { instance }),
+            Err(SncfrError::AuthRequired { profile }) => Err(SncfrError::AuthRequired { profile }),
+            Err(err) => {
+                crate::debug_log!(
+                    "batch",
+                    "/api/now/batch unavailable ({err}); falling back to {} concurrent GET requests",
+                    requests.len()
+                );
+                let futures = requests
+                    .iter()
+                    .map(|sub_req| self.execute_fallback_sub_get(sub_req));
+                let results = futures_util::future::join_all(futures).await;
+                let mut serviced_requests = Vec::with_capacity(results.len());
+                for res in results {
+                    serviced_requests.push(res?);
+                }
+                Ok(BatchResponse {
+                    batch_request_id: Some(batch_request_id.to_string()),
+                    serviced_requests,
+                    unserviced_requests: Vec::new(),
+                })
+            }
+        }
+    }
+
+    async fn execute_fallback_sub_get(
+        &self,
+        sub_req: &BatchGetSubRequest,
+    ) -> Result<ServicedSubResponse, SncfrError> {
+        let sanitized = sanitize_batch_sub_url(&sub_req.url);
+        let url = self.endpoint_url(&sanitized)?;
+        crate::debug_log!("http", "GET (batch-fallback '{}') {url}", sub_req.id);
+        let started = Instant::now();
+        let req = self.auth.apply(self.http.get(url))?;
+        let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
+        let status = resp.status();
+        let code = status.as_u16();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        crate::debug_log!(
+            "http",
+            "GET (batch-fallback '{}') -> HTTP {status} ({elapsed_ms}ms)",
+            sub_req.id
+        );
+
+        if code == 401 || status.is_redirection() {
+            return Err(SncfrError::AuthExpired {
+                instance: self.base_url.as_str().trim_end_matches('/').to_string(),
+            });
+        }
+
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+        if status.is_success() && content_type.contains("text/html") {
+            return Err(SncfrError::AuthExpired {
+                instance: self.base_url.as_str().trim_end_matches('/').to_string(),
+            });
+        }
+
+        let status_text = status.canonical_reason().map(str::to_string);
+        let bytes = resp.bytes().await.map_err(|e| self.map_reqwest_error(e))?;
+        let encoded_body = BASE64_STANDARD.encode(&bytes);
+        let error_message = if !status.is_success() {
+            let text = String::from_utf8_lossy(&bytes);
+            extract_servicenow_error_detail(&text).or_else(|| status_text.clone())
+        } else {
+            None
+        };
+
+        Ok(ServicedSubResponse {
+            id: sub_req.id.clone(),
+            status_code: code,
+            status_text,
+            body: Some(encoded_body),
+            error_message,
+            execution_time: Some(elapsed_ms),
+        })
     }
 
     fn endpoint_url(&self, path: &str) -> Result<Url, SncfrError> {
@@ -657,6 +759,10 @@ impl MutatingClient {
             .map_err(|e| self.read_only.map_reqwest_error(e))?;
         self.read_only.decode_json_response(resp, path).await
     }
+}
+
+fn sanitize_batch_sub_url(raw: &str) -> String {
+    raw.replace('^', "%5E").replace(' ', "%20")
 }
 
 fn extract_servicenow_error_detail(body: &str) -> Option<String> {

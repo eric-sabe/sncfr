@@ -272,7 +272,7 @@ pub async fn assemble_ticket_dossier(
     batch_reqs.push(BatchGetSubRequest::new("attachments", attachments_url));
 
     let batch_resp = client
-        .batch_get(&format!("dossier-{}", resolved.number), &batch_reqs)
+        .batch_get_with_fallback(&format!("dossier-{}", resolved.number), &batch_reqs)
         .await?;
 
     let mut acl_warnings = Vec::new();
@@ -964,6 +964,98 @@ mod tests {
             dossier.activity_stream.entries[0]
                 .body
                 .contains("Investigating gateway logs.")
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_concurrent_get_requests_when_batch_api_is_restricted() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_number"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": [] })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/incident"))
+            .and(query_param("sysparm_query", "number=INC0099999"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "sys_id": { "value": "inc_sys_99", "display_value": "inc_sys_99" },
+                    "number": { "value": "INC0099999", "display_value": "INC0099999" },
+                    "state": { "value": "2", "display_value": "In Progress" },
+                    "short_description": { "value": "Batch API restricted test", "display_value": "Batch API restricted test" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        // Simulate `/api/now/batch` being restricted/unavailable (HTTP 403 or 400)
+        Mock::given(method("POST"))
+            .and(path("/api/now/batch"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": { "message": "Access to /api/now/batch is restricted" }
+            })))
+            .mount(&server)
+            .await;
+
+        // Individual GET sub-requests succeed via concurrent fallback
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_journal_field"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "sys_id": { "value": "j99", "display_value": "j99" },
+                    "element": { "value": "comments", "display_value": "Additional comments" },
+                    "value": { "value": "Fetched via concurrent GET fallback.", "display_value": "Fetched via concurrent GET fallback." },
+                    "sys_created_by": { "value": "eric", "display_value": "Eric Sabetti" },
+                    "sys_created_on": { "value": "2026-10-23 11:55:00", "display_value": "2026-10-23 11:55:00" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        for sub_path in [
+            "/api/now/table/task",
+            "/api/now/table/sysapproval_approver",
+            "/api/now/table/task_ci",
+            "/api/now/table/sys_attachment",
+        ] {
+            Mock::given(method("GET"))
+                .and(path(sub_path))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": [] })))
+                .mount(&server)
+                .await;
+        }
+
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        let args = ShowArgs {
+            tickets: vec!["INC0099999".to_string()],
+            all_fields: false,
+            fields: vec![],
+            no_journal: false,
+            no_related: false,
+        };
+
+        let dossier = assemble_ticket_dossier(&client, &cache, &args, "INC0099999")
+            .await
+            .expect("assemble dossier via concurrent GET fallback");
+
+        assert_eq!(dossier.number, "INC0099999");
+        assert!(!dossier.activity_stream.degraded_inline_fallback);
+        assert_eq!(dossier.activity_stream.entries.len(), 1);
+        assert_eq!(
+            dossier.activity_stream.entries[0].body,
+            "Fetched via concurrent GET fallback."
         );
     }
 }

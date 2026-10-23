@@ -124,13 +124,21 @@ pub async fn execute_doctor(
                 }
             }
         }
-        Err(_) => {
+        Err(batch_err) => {
+            let batch_code = match &batch_err {
+                SncfrError::AclForbidden { .. } => 403,
+                SncfrError::NotFound { .. } => 404,
+                SncfrError::NetworkOrInstance {
+                    status: Some(code), ..
+                } => *code,
+                _ => 403,
+            };
             capabilities.push(CapabilityCheck {
                 resource: "api:batch".to_string(),
                 endpoint: "/api/now/batch".to_string(),
-                status_code: 403,
+                status_code: batch_code,
                 accessible: false,
-                note: "Unavailable (sncfr will fall back to sequential GET requests)".to_string(),
+                note: "Unavailable (sncfr will fall back to concurrent GET requests)".to_string(),
             });
 
             for (res_id, endpoint, fallback_note) in PROBED_RESOURCES {
