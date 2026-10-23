@@ -1,5 +1,6 @@
+use crate::cache::{CachedGroup, CachedIdentity, InstanceCache};
 use crate::cli::{AuthImportArgs, AuthLoginArgs, Cli};
-use crate::client::{ClientAuth, ReadOnlyClient};
+use crate::client::{ClientAuth, ReadOnlyClient, extract_field_display, extract_field_value};
 use crate::config::{
     AppConfig, AuthMethod, ResolvedProfile, default_config_path, normalize_instance_url,
 };
@@ -1260,6 +1261,160 @@ pub async fn resolve_authenticated_client(
     };
 
     ReadOnlyClient::new(profile.instance_url.clone(), auth)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthStatusSummary {
+    pub authenticated: bool,
+    pub profile: String,
+    pub instance_url: String,
+    pub auth_method: String,
+    pub read_only_locked: bool,
+    pub identity: CachedIdentity,
+}
+
+/// Resolves the current `@me` [`CachedIdentity`] (`sys_user` + `sys_user_grmember` active groups),
+/// reading from `cache` when `force_refresh == false` and writing the updated identity to `identity.json`.
+pub async fn resolve_current_identity(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    force_refresh: bool,
+) -> Result<CachedIdentity, SncfrError> {
+    if !force_refresh && let Ok(Some(cached)) = cache.read_identity() {
+        return Ok(cached);
+    }
+
+    // 1. Try querying `sys_user` for `javascript:gs.getUserID()`
+    let sys_user_query = [
+        ("sysparm_query", "sys_id=javascript:gs.getUserID()"),
+        ("sysparm_limit", "1"),
+        ("sysparm_display_value", "all"),
+        ("sysparm_fields", "sys_id,user_name,name,email"),
+    ];
+
+    let mut resolved_user: Option<(String, String, String, Option<String>)> = None;
+    match client
+        .get_json::<Value>("/api/now/table/sys_user", &sys_user_query)
+        .await
+    {
+        Ok(resp) => {
+            if let Some(first) = resp
+                .get("result")
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.first())
+                && let Some(sys_id) = extract_field_value(first, "sys_id")
+            {
+                let user_name =
+                    extract_field_value(first, "user_name").unwrap_or_else(|| sys_id.clone());
+                let display_name =
+                    extract_field_display(first, "name").unwrap_or_else(|| user_name.clone());
+                let email = extract_field_value(first, "email");
+                resolved_user = Some((sys_id, user_name, display_name, email));
+            }
+        }
+        Err(SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. }) => {
+            return Err(SncfrError::AuthExpired {
+                instance: client.base_url().as_str().trim_end_matches('/').to_string(),
+            });
+        }
+        Err(_) => {
+            // Fall through to `/api/now/ui/user/current_user` if `sys_user` is ACL-restricted
+        }
+    }
+
+    // 2. Fallback to `/api/now/ui/user/current_user` if `sys_user` was empty or 403 Forbidden
+    if resolved_user.is_none() {
+        let ui_resp: Value = client
+            .get_json("/api/now/ui/user/current_user", &[])
+            .await?;
+        let res = ui_resp.get("result").unwrap_or(&ui_resp);
+        let sys_id = res
+            .get("user_sys_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| SncfrError::AuthExpired {
+                instance: client.base_url().as_str().trim_end_matches('/').to_string(),
+            })?
+            .to_string();
+        let user_name = res
+            .get("user_name")
+            .and_then(Value::as_str)
+            .unwrap_or(&sys_id)
+            .to_string();
+        let display_name = res
+            .get("user_display_name")
+            .and_then(Value::as_str)
+            .unwrap_or(&user_name)
+            .to_string();
+        resolved_user = Some((sys_id, user_name, display_name, None));
+    }
+
+    let (sys_id, user_name, display_name, email) =
+        resolved_user.ok_or_else(|| SncfrError::AuthExpired {
+            instance: client.base_url().as_str().trim_end_matches('/').to_string(),
+        })?;
+
+    // 3. Query `sys_user_grmember` for the user's active assignment groups (degrade gracefully on 403)
+    let gr_query_str = format!("user={sys_id}^group.active=true");
+    let gr_query = [
+        ("sysparm_query", gr_query_str.as_str()),
+        ("sysparm_display_value", "all"),
+        ("sysparm_fields", "group"),
+        ("sysparm_limit", "200"),
+    ];
+
+    let mut groups = Vec::new();
+    if let Ok(gr_resp) = client
+        .get_json::<Value>("/api/now/table/sys_user_grmember", &gr_query)
+        .await
+        && let Some(rows) = gr_resp.get("result").and_then(Value::as_array)
+    {
+        for row in rows {
+            if let Some(group_id) = extract_field_value(row, "group") {
+                let group_name =
+                    extract_field_display(row, "group").unwrap_or_else(|| group_id.clone());
+                if !groups.iter().any(|g: &CachedGroup| g.sys_id == group_id) {
+                    groups.push(CachedGroup {
+                        sys_id: group_id,
+                        name: group_name,
+                    });
+                }
+            }
+        }
+    }
+
+    let identity = CachedIdentity {
+        sys_id,
+        user_name,
+        display_name,
+        email,
+        groups,
+    };
+
+    let _ = cache.write_identity(&identity);
+    Ok(identity)
+}
+
+/// Executes `sncfr auth status`: verifies active session validity against the instance and returns [`AuthStatusSummary`].
+pub async fn execute_auth_status(
+    profile: &ResolvedProfile,
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+) -> Result<AuthStatusSummary, SncfrError> {
+    let identity = resolve_current_identity(client, cache, true).await?;
+    Ok(AuthStatusSummary {
+        authenticated: true,
+        profile: profile.name.clone(),
+        instance_url: profile
+            .instance_url
+            .as_str()
+            .trim_end_matches('/')
+            .to_string(),
+        auth_method: profile.auth_method.as_str().to_string(),
+        read_only_locked: profile.is_read_only_locked(),
+        identity,
+    })
 }
 
 #[cfg(test)]

@@ -589,6 +589,68 @@ fn extract_servicenow_error_detail(body: &str) -> Option<String> {
     }
 }
 
+/// Extracts the raw internal `value` of a field from a ServiceNow JSON record (handles both
+/// `sysparm_display_value=all` `{ display_value, value }` objects and plain string scalars).
+pub fn extract_field_value(record: &serde_json::Value, field: &str) -> Option<String> {
+    let f = record.get(field)?;
+    if let Some(s) = f.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+    if let Some(obj) = f.as_object() {
+        if let Some(v) = obj.get("value").and_then(|v| v.as_str()) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(dv) = obj.get("display_value").and_then(|v| v.as_str()) {
+            let trimmed = dv.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extracts the human-readable `display_value` of a field from a ServiceNow JSON record.
+pub fn extract_field_display(record: &serde_json::Value, field: &str) -> Option<String> {
+    let f = record.get(field)?;
+    if let Some(s) = f.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+    if let Some(obj) = f.as_object() {
+        if let Some(dv) = obj.get("display_value").and_then(|v| v.as_str()) {
+            let trimmed = dv.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(v) = obj.get("value").and_then(|v| v.as_str()) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extracts `(display_value, value)` from a ServiceNow JSON record field if non-empty.
+pub fn extract_field_pair(record: &serde_json::Value, field: &str) -> Option<(String, String)> {
+    let disp = extract_field_display(record, field)?;
+    let val = extract_field_value(record, field).unwrap_or_else(|| disp.clone());
+    Some((disp, val))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

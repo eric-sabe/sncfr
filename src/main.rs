@@ -1,11 +1,14 @@
 use clap::Parser;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use sncfr::auth::{
-    AuthImportSummary, AuthLoginSummary, AuthLogoutSummary, CredentialStore, execute_auth_import,
-    execute_auth_login, execute_auth_logout,
+    AuthImportSummary, AuthLoginSummary, AuthLogoutSummary, AuthStatusSummary, CredentialStore,
+    can_auto_reauth, execute_auth_import, execute_auth_login, execute_auth_logout,
+    execute_auth_status, resolve_authenticated_client,
 };
-use sncfr::cli::{AuthCommands, Cli, Commands};
+use sncfr::cache::InstanceCache;
+use sncfr::cli::{AuthCommands, AuthLoginArgs, Cli, Commands};
 use sncfr::config::AppConfig;
+use sncfr::doctor::{execute_doctor, format_doctor_report};
 use sncfr::error::SncfrError;
 use sncfr::output::{OutputFormat, ResolvedOutputFormat, format_error};
 use sncfr::validate_invocation;
@@ -14,6 +17,7 @@ use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let is_stdin_tty = std::io::stdin().is_terminal();
     let is_stdout_tty = std::io::stdout().is_terminal();
     let is_stderr_tty = std::io::stderr().is_terminal();
 
@@ -108,10 +112,191 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Commands::Auth(AuthCommands::Status) => {
+            let profile = match config.resolve_profile(&cli) {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let store = CredentialStore::default_store();
+            let cache = match InstanceCache::for_instance(&profile.instance_key) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let mut client = match resolve_authenticated_client(
+                &cli,
+                &mut config,
+                &profile,
+                &store,
+                is_stdin_tty,
+                is_stdout_tty,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let mut res = execute_auth_status(&profile, &client, &cache).await;
+            if matches!(res, Err(SncfrError::AuthExpired { .. }))
+                && can_auto_reauth(&cli, &profile, is_stdin_tty, is_stdout_tty)
+            {
+                eprintln!(
+                    "ServiceNow session expired for '{}'; launching isolated SSO browser window...",
+                    profile.instance_url
+                );
+                let login_args = AuthLoginArgs {
+                    browser: None,
+                    timeout_secs: 180,
+                };
+                if execute_auth_login(&cli, &mut config, &login_args, &store)
+                    .await
+                    .is_ok()
+                    && let Ok(new_client) = resolve_authenticated_client(
+                        &cli,
+                        &mut config,
+                        &profile,
+                        &store,
+                        false,
+                        false,
+                    )
+                    .await
+                {
+                    client = new_client;
+                    res = execute_auth_status(&profile, &client, &cache).await;
+                }
+            }
+            match res {
+                Ok(summary) => {
+                    render_auth_status(&summary, resolved_output);
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
+        Commands::Doctor => {
+            let profile = match config.resolve_profile(&cli) {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let store = CredentialStore::default_store();
+            let cache = match InstanceCache::for_instance(&profile.instance_key) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let mut client = match resolve_authenticated_client(
+                &cli,
+                &mut config,
+                &profile,
+                &store,
+                is_stdin_tty,
+                is_stdout_tty,
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
+            let mut res = execute_doctor(&profile, &client, &cache).await;
+            if matches!(res, Err(SncfrError::AuthExpired { .. }))
+                && can_auto_reauth(&cli, &profile, is_stdin_tty, is_stdout_tty)
+            {
+                eprintln!(
+                    "ServiceNow session expired for '{}'; launching isolated SSO browser window...",
+                    profile.instance_url
+                );
+                let login_args = AuthLoginArgs {
+                    browser: None,
+                    timeout_secs: 180,
+                };
+                if execute_auth_login(&cli, &mut config, &login_args, &store)
+                    .await
+                    .is_ok()
+                    && let Ok(new_client) = resolve_authenticated_client(
+                        &cli,
+                        &mut config,
+                        &profile,
+                        &store,
+                        false,
+                        false,
+                    )
+                    .await
+                {
+                    client = new_client;
+                    res = execute_doctor(&profile, &client, &cache).await;
+                }
+            }
+            match res {
+                Ok(report) => {
+                    println!("{}", format_doctor_report(&report, resolved_output));
+                    return ExitCode::SUCCESS;
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            }
+        }
         _ => {}
     }
 
     ExitCode::SUCCESS
+}
+
+fn render_auth_status(summary: &AuthStatusSummary, format: ResolvedOutputFormat) {
+    match format {
+        ResolvedOutputFormat::Json => {
+            if let Ok(json) = serde_json::to_string_pretty(summary) {
+                println!("{json}");
+            }
+        }
+        ResolvedOutputFormat::Yaml => {
+            if let Ok(yaml) = serde_yaml::to_string(summary) {
+                print!("{yaml}");
+            }
+        }
+        _ => {
+            let group_names: Vec<&str> = summary
+                .identity
+                .groups
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect();
+            println!("Profile:    {} ({})", summary.profile, summary.instance_url);
+            println!("Auth:       {} (AUTHENTICATED)", summary.auth_method);
+            println!(
+                "User (@me): {} ({}) [sys_id: {}]",
+                summary.identity.display_name, summary.identity.user_name, summary.identity.sys_id
+            );
+            println!(
+                "Groups:     {}",
+                if group_names.is_empty() {
+                    "(none or dynamic fallback)".to_string()
+                } else {
+                    group_names.join(", ")
+                }
+            );
+        }
+    }
 }
 
 fn render_auth_login(summary: &AuthLoginSummary, format: ResolvedOutputFormat) {
