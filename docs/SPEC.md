@@ -40,8 +40,8 @@ ServiceNow's official CLI offerings fail the everyday user and AI agent use case
 1. **Corporate SSO Session (`sso`, Default)**:
    - Authenticates REST API requests using session cookies (`JSESSIONID`, `glide_user_route`, `glide_user_activity`, `glide_session_store`, etc.) plus the `X-UserToken: <g_ck>` CSRF/session token header.
    - **`sncfr auth login`**:
-     - Locates the system's managed Chromium-based browser (Chrome, Edge, Brave, Arc) and launches an isolated `--app=https://<instance>.service-now.com` window connected via Chrome DevTools Protocol (CDP) using a dedicated profile directory (`~/.local/share/sncfr/browser-profile/<instance>`).
-     - Waits for the user to complete SSO/MFA and for the ServiceNow session (`window.g_ck` or authenticated `/api/now/ui/user/current_user`) to become active.
+     - Locates the system's managed Chromium-based browser (preferring the OS default browser among Edge, Chrome, Brave, and Arc, or `--browser <edge|chrome|brave|arc|/path/to/exe>`) and launches an isolated `--app=https://<instance>.service-now.com` window connected via Chrome DevTools Protocol (CDP) using a dedicated profile directory (`~/.local/share/sncfr/browser-profile/<instance>`).
+     - Waits for the user to complete SSO/MFA and verifies that a real non-guest user session (`NOW.user.name` / `/api/now/ui/user/current_user` != `guest`) and `window.g_ck` are active.
      - Extracts all domain cookies via CDP `Network.getCookies` and `window.g_ck` via `Runtime.evaluate`, closes the window automatically, and stores the encrypted session bundle in the OS Keychain (`keyring`).
 2. **Headless / Manual Session Import (`sncfr auth import`)**:
    - Accepts a "Copy as cURL" command from browser DevTools, raw `Cookie` + `X-UserToken` values via stdin or `--file`, explicit `--cookie` / `--user-token` flags, or environment variables (`SNCFR_COOKIE`, `SNCFR_USER_TOKEN`) for remote/SSH/container environments. If only a session `Cookie` is provided, `sncfr auth import` automatically attempts to fetch `window.g_ck` (`X-UserToken`) from `/now/nav/ui/home` or `/navpage.do`.

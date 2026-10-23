@@ -647,7 +647,7 @@ pub async fn fetch_g_ck_with_cookie(
     })?;
 
     let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| SncfrError::NetworkOrInstance {
             message: format!("Failed to build HTTP client: {e}"),
@@ -655,7 +655,14 @@ pub async fn fetch_g_ck_with_cookie(
             remediation: None,
         })?;
 
-    for path in ["/now/nav/ui/home", "/navpage.do", "/$sp.do"] {
+    let target_host = base_url.host_str().unwrap_or_default();
+    for path in [
+        "/now/nav/ui/home",
+        "/sys_user.do?sys_id=javascript:gs.getUserID()&sysparm_nostack=true",
+        "/welcome.do",
+        "/navpage.do",
+        "/$sp.do",
+    ] {
         if let Ok(url) = base_url.join(path)
             && let Ok(resp) = http
                 .get(url)
@@ -664,6 +671,11 @@ pub async fn fetch_g_ck_with_cookie(
                 .send()
                 .await
             && resp.status().is_success()
+            && resp
+                .url()
+                .host_str()
+                .is_some_and(|h| h.eq_ignore_ascii_case(target_host))
+            && !resp.url().path().contains("login.do")
             && let Ok(html) = resp.text().await
             && let Some(token) = extract_g_ck_from_html(&html)
         {
@@ -812,16 +824,22 @@ struct CdpCookie {
     domain: String,
 }
 
-/// Discovers the user's managed Chromium-based browser executable (Chrome, Edge, Brave, Arc, Chromium).
+/// Discovers the user's managed Chromium-based browser executable (preferring the OS default browser
+/// among Edge, Chrome, Brave, Arc, and Chromium, or an explicit `--browser` path/shorthand).
 pub fn discover_managed_browser(explicit: Option<&Path>) -> Result<PathBuf, SncfrError> {
     if let Some(path) = explicit {
         if path.exists() {
             return Ok(path.to_path_buf());
         }
+        if let Some(s) = path.to_str()
+            && let Some(resolved) = resolve_browser_shorthand(s)
+        {
+            return Ok(resolved);
+        }
         return Err(SncfrError::InvalidArgs {
-            message: format!("Specified browser executable '{}' does not exist", path.display()),
+            message: format!("Specified browser '{}' was not found", path.display()),
             remediation: Some(
-                "Pass a valid path to `--browser` or use `sncfr auth import` in headless environments."
+                "Pass `--browser edge`, `--browser chrome`, `--browser brave`, a full executable path, or use `sncfr auth import`."
                     .to_string(),
             ),
         });
@@ -830,36 +848,88 @@ pub fn discover_managed_browser(explicit: Option<&Path>) -> Result<PathBuf, Sncf
     if let Ok(env_browser) = std::env::var("SNCFR_BROWSER")
         && !env_browser.trim().is_empty()
     {
-        let p = PathBuf::from(env_browser.trim());
+        let trimmed = env_browser.trim();
+        let p = PathBuf::from(trimmed);
         if p.exists() {
             return Ok(p);
         }
+        if let Some(resolved) = resolve_browser_shorthand(trimmed) {
+            return Ok(resolved);
+        }
     }
+
+    // 1. Prefer the user's OS default browser if it is a supported Chromium browser
+    if let Some(default_kind) = detect_os_default_chromium_browser()
+        && let Some(resolved) = resolve_browser_shorthand(default_kind)
+    {
+        return Ok(resolved);
+    }
+
+    // 2. Fallback to installed Chromium browsers
+    for shorthand in ["edge", "chrome", "brave", "arc", "chromium"] {
+        if let Some(resolved) = resolve_browser_shorthand(shorthand) {
+            return Ok(resolved);
+        }
+    }
+
+    Err(SncfrError::InvalidArgs {
+        message: "Could not locate a managed Chromium browser (Edge, Chrome, Brave, Arc) on this system"
+            .to_string(),
+        remediation: Some(
+            "Pass `--browser /path/to/browser` or use `sncfr auth import` to import a session from any browser."
+                .to_string(),
+        ),
+    })
+}
+
+fn resolve_browser_shorthand(name: &str) -> Option<PathBuf> {
+    let lower = name.trim().to_ascii_lowercase();
+    let kind = if lower.contains("edge") {
+        "edge"
+    } else if lower.contains("brave") {
+        "brave"
+    } else if lower.contains("arc") {
+        "arc"
+    } else if lower.contains("chromium") {
+        "chromium"
+    } else if lower.contains("chrome") {
+        "chrome"
+    } else {
+        return None;
+    };
 
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     #[cfg(target_os = "macos")]
     {
-        candidates.extend([
-            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            PathBuf::from("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-            PathBuf::from("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-            PathBuf::from("/Applications/Arc.app/Contents/MacOS/Arc"),
-            PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ]);
+        match kind {
+            "edge" => candidates.push(PathBuf::from(
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            )),
+            "chrome" => candidates.push(PathBuf::from(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            )),
+            "brave" => candidates.push(PathBuf::from(
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            )),
+            "arc" => candidates.push(PathBuf::from("/Applications/Arc.app/Contents/MacOS/Arc")),
+            "chromium" => candidates.push(PathBuf::from(
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            )),
+            _ => {}
+        }
     }
 
     #[cfg(target_os = "linux")]
     {
-        for bin in [
-            "google-chrome",
-            "google-chrome-stable",
-            "microsoft-edge",
-            "microsoft-edge-stable",
-            "brave-browser",
-            "chromium",
-            "chromium-browser",
-        ] {
+        let bins: &[&str] = match kind {
+            "edge" => &["microsoft-edge", "microsoft-edge-stable"],
+            "chrome" => &["google-chrome", "google-chrome-stable"],
+            "brave" => &["brave-browser"],
+            "chromium" => &["chromium", "chromium-browser"],
+            _ => &[],
+        };
+        for bin in bins {
             for prefix in ["/usr/bin", "/usr/local/bin", "/snap/bin"] {
                 candidates.push(PathBuf::from(prefix).join(bin));
             }
@@ -870,30 +940,112 @@ pub fn discover_managed_browser(explicit: Option<&Path>) -> Result<PathBuf, Sncf
     {
         for env_key in ["ProgramFiles", "ProgramFiles(x86)", "LocalAppData"] {
             if let Ok(base) = std::env::var(env_key) {
-                candidates.push(PathBuf::from(&base).join(r"Google\Chrome\Application\chrome.exe"));
-                candidates
-                    .push(PathBuf::from(&base).join(r"Microsoft\Edge\Application\msedge.exe"));
-                candidates.push(
-                    PathBuf::from(&base).join(r"BraveSoftware\Brave-Browser\Application\brave.exe"),
-                );
+                match kind {
+                    "edge" => candidates
+                        .push(PathBuf::from(&base).join(r"Microsoft\Edge\Application\msedge.exe")),
+                    "chrome" => candidates
+                        .push(PathBuf::from(&base).join(r"Google\Chrome\Application\chrome.exe")),
+                    "brave" => candidates.push(
+                        PathBuf::from(&base)
+                            .join(r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+                    ),
+                    _ => {}
+                }
             }
         }
     }
 
-    for candidate in candidates {
-        if candidate.exists() {
-            return Ok(candidate);
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn detect_os_default_chromium_browser() -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(base_dirs) = directories::BaseDirs::new() {
+            let plist = base_dirs
+                .home_dir()
+                .join("Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist");
+            if plist.exists()
+                && let Ok(out) = Command::new("/usr/bin/plutil")
+                    .args(["-convert", "json", "-o", "-"])
+                    .arg(&plist)
+                    .output()
+                && out.status.success()
+                && let Ok(val) = serde_json::from_slice::<Value>(&out.stdout)
+                && let Some(handlers) = val.get("LSHandlers").and_then(Value::as_array)
+            {
+                for h in handlers {
+                    let scheme = h
+                        .get("LSHandlerURLScheme")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if scheme.eq_ignore_ascii_case("https") {
+                        let role = h
+                            .get("LSHandlerRoleAll")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        if role.contains("edgemac") {
+                            return Some("edge");
+                        } else if role.contains("chrome") {
+                            return Some("chrome");
+                        } else if role.contains("brave") {
+                            return Some("brave");
+                        } else if role.contains("thebrowser") {
+                            return Some("arc");
+                        } else if role.contains("chromium") {
+                            return Some("chromium");
+                        }
+                    }
+                }
+            }
         }
     }
 
-    Err(SncfrError::InvalidArgs {
-        message: "Could not locate a managed Chromium browser (Chrome, Edge, Brave, Arc) on this system"
-            .to_string(),
-        remediation: Some(
-            "Pass `--browser /path/to/chrome` or use `sncfr auth import` to import a session from any browser."
-                .to_string(),
-        ),
-    })
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
+                "/v",
+                "ProgId",
+            ])
+            .output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+            if text.contains("msedge") {
+                return Some("edge");
+            } else if text.contains("chrome") {
+                return Some("chrome");
+            } else if text.contains("brave") {
+                return Some("brave");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = Command::new("xdg-settings")
+            .args(["get", "default-web-browser"])
+            .output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+            if text.contains("edge") {
+                return Some("edge");
+            } else if text.contains("chrome") {
+                return Some("chrome");
+            } else if text.contains("brave") {
+                return Some("brave");
+            } else if text.contains("chromium") {
+                return Some("chromium");
+            }
+        }
+    }
+
+    None
 }
 
 /// Returns the isolated browser profile directory (`~/.local/share/sncfr/browser-profile/<instance_key>`).
@@ -935,6 +1087,44 @@ fn pick_ephemeral_port() -> Result<u16, SncfrError> {
     Ok(port)
 }
 
+/// If a previous `sncfr auth login` run was interrupted (`Ctrl+C`), an orphaned browser process
+/// may still hold `SingletonLock` on `profile_dir` with an older `--remote-debugging-port`.
+/// This helper closes any existing CDP browser listening on `DevToolsActivePort` and cleans up stale locks.
+async fn cleanup_stale_browser_profile(profile_dir: &Path) {
+    let active_port_file = profile_dir.join("DevToolsActivePort");
+    if let Ok(contents) = fs::read_to_string(&active_port_file) {
+        let mut lines = contents.lines();
+        if let (Some(port_str), Some(ws_path)) = (lines.next(), lines.next())
+            && let Ok(old_port) = port_str.trim().parse::<u16>()
+        {
+            let ws_url = format!("ws://127.0.0.1:{old_port}{}", ws_path.trim());
+            if let Ok(Ok((mut ws, _))) = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio_tungstenite::connect_async(&ws_url),
+            )
+            .await
+            {
+                let close_cmd = json!({
+                    "id": 99,
+                    "method": "Browser.close",
+                    "params": {}
+                });
+                let _ = ws.send(Message::Text(close_cmd.to_string().into())).await;
+                let _ = ws.close(None).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    }
+    for lock_name in [
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+        "DevToolsActivePort",
+    ] {
+        let _ = fs::remove_file(profile_dir.join(lock_name));
+    }
+}
+
 /// Polls a local CDP HTTP/WebSocket endpoint until a valid ServiceNow session (`Cookie` + `window.g_ck`)
 /// is active on `instance_url`, then closes the browser via `Browser.close` and returns `(cookie, user_token)`.
 pub async fn capture_session_via_cdp(
@@ -954,6 +1144,7 @@ pub async fn capture_session_via_cdp(
     let list_url = format!("http://127.0.0.1:{cdp_port}/json/list");
     let target_host = instance_url.host_str().unwrap_or_default().to_lowercase();
     let deadline = Instant::now() + timeout;
+    let mut last_logged_host = String::new();
 
     while Instant::now() < deadline {
         if let Ok(resp) = http.get(&list_url).send().await
@@ -967,8 +1158,27 @@ pub async fn capture_session_via_cdp(
                 let Some(ws_url) = target.web_socket_debugger_url.as_deref() else {
                     continue;
                 };
+                let parsed_url = Url::parse(&target.url).ok();
+                if let Some(u) = &parsed_url
+                    && let Some(h) = u.host_str()
+                    && !h.is_empty()
+                    && h != last_logged_host
+                {
+                    last_logged_host = h.to_string();
+                    if h.eq_ignore_ascii_case(&target_host) {
+                        eprintln!(
+                            "  [SSO] Browser is on ServiceNow ({h}{}) — checking session...",
+                            u.path()
+                        );
+                    } else {
+                        eprintln!(
+                            "  [SSO] Browser is on Identity Provider ({h}) — please complete sign-in in the browser window..."
+                        );
+                    }
+                }
+
                 // Only inspect pages once navigation has landed on (or returned to) an authenticated ServiceNow page
-                let is_on_instance = Url::parse(&target.url).ok().is_some_and(|u| {
+                let is_on_instance = parsed_url.is_some_and(|u| {
                     let host_ok = u
                         .host_str()
                         .is_some_and(|h| h.eq_ignore_ascii_case(&target_host));
@@ -985,7 +1195,7 @@ pub async fn capture_session_via_cdp(
                 if let Ok(Some((cookie, g_ck))) =
                     probe_cdp_page_session(ws_url, instance_url, &target_host).await
                 {
-                    return Ok((cookie, Some(g_ck)));
+                    return Ok((cookie, g_ck));
                 }
             }
         }
@@ -997,11 +1207,135 @@ pub async fn capture_session_via_cdp(
     })
 }
 
+const CDP_SESSION_PROBE_JS: &str = r#"
+(async () => {
+  const href = (window.location && window.location.href) || '';
+  const p = ((window.location && window.location.pathname) || '').toLowerCase();
+  if (
+    p.includes('login') ||
+    p.includes('saml_redirector') ||
+    p.includes('logout') ||
+    p.includes('auth_redirect') ||
+    p.includes('external_logout') ||
+    href.includes('SAMLRequest=') ||
+    href.includes('RelayState=')
+  ) {
+    return null;
+  }
+
+  const GUEST_SYS_ID = '5136503cc611227c0183e96598c4f706';
+  const isRealUser = (name, sysId) => {
+    if (sysId && sysId === GUEST_SYS_ID) return false;
+    if (!name || typeof name !== 'string') return false;
+    const norm = name.trim().toLowerCase();
+    return norm.length > 0 && norm !== 'guest' && norm !== 'anonymous' && norm !== 'system';
+  };
+
+  const findUserInWin = (w) => {
+    try {
+      if (w.NOW && w.NOW.user && isRealUser(w.NOW.user.name || w.NOW.user.userName, w.NOW.user.userID)) {
+        return w.NOW.user.name || w.NOW.user.userName;
+      }
+      if (w.NOW && isRealUser(w.NOW.user_name, w.NOW.user_id)) {
+        return w.NOW.user_name;
+      }
+      if (w.ux_globals && w.ux_globals.sysprops && isRealUser(w.ux_globals.sysprops['user.name'], null)) {
+        return w.ux_globals.sysprops['user.name'];
+      }
+    } catch (_) {}
+    return null;
+  };
+
+  let authedUser = findUserInWin(window);
+  if (!authedUser && window.frames) {
+    for (let i = 0; i < window.frames.length; i++) {
+      authedUser = findUserInWin(window.frames[i]);
+      if (authedUser) break;
+    }
+  }
+
+  const findTokenInWin = (w) => {
+    try {
+      if (typeof w.g_ck === 'string' && w.g_ck.length >= 16) return w.g_ck;
+      if (w.NOW && typeof w.NOW.g_ck === 'string' && w.NOW.g_ck.length >= 16) return w.NOW.g_ck;
+      if (w.ux_globals && w.ux_globals.sysprops && typeof w.ux_globals.sysprops['glide.security.csrf_token'] === 'string') {
+        return w.ux_globals.sysprops['glide.security.csrf_token'];
+      }
+      const inp = w.document && w.document.querySelector && w.document.querySelector('input[name="sysparm_ck"], #sysparm_ck');
+      if (inp && typeof inp.value === 'string' && inp.value.length >= 16) return inp.value;
+    } catch (_) {}
+    return null;
+  };
+
+  let token = findTokenInWin(window);
+  if (!token && window.frames) {
+    for (let i = 0; i < window.frames.length; i++) {
+      token = findTokenInWin(window.frames[i]);
+      if (token) break;
+    }
+  }
+
+  const extractFromText = (txt) => {
+    if (!txt || txt.includes("NOW.user.name = 'guest'") || txt.includes('"user_name":"guest"')) return null;
+    for (const pat of ["window.g_ck = '", 'window.g_ck = "', "window.g_ck='", 'window.g_ck="', "var g_ck = '", 'var g_ck = "', '"g_ck":"', "'g_ck':'"]) {
+      const idx = txt.indexOf(pat);
+      if (idx !== -1) {
+        const rest = txt.slice(idx + pat.length);
+        const q = pat[pat.length - 1];
+        const end = rest.indexOf(q);
+        if (end >= 16 && end <= 160) return rest.slice(0, end).trim();
+      }
+    }
+    return null;
+  };
+
+  // Verify via `/api/now/ui/user/current_user` if DOM globals didn't expose `NOW.user.name`
+  if (!authedUser && typeof fetch === 'function') {
+    try {
+      const headers = { 'Accept': 'application/json' };
+      if (token) headers['X-UserToken'] = token;
+      const r = await fetch('/api/now/ui/user/current_user', { credentials: 'include', headers });
+      if (r.ok && !(r.url || '').toLowerCase().includes('login')) {
+        const data = await r.json();
+        const res = (data && data.result) || data || {};
+        const uName = res.user_name || res.userName || '';
+        const uSysId = res.user_sys_id || res.sys_id || '';
+        if (isRealUser(uName, uSysId)) {
+          authedUser = uName;
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Never accept a session unless we have confirmed a real non-guest user is logged in
+  if (!authedUser) {
+    return null;
+  }
+
+  if (!token && document && document.documentElement) {
+    token = extractFromText(document.documentElement.innerHTML);
+  }
+  if (!token && typeof fetch === 'function') {
+    for (const url of ['/sys_user.do?sys_id=javascript:gs.getUserID()&sysparm_nostack=true', '/welcome.do', '/now/nav/ui/home', '/$sp.do']) {
+      try {
+        const r = await fetch(url, { credentials: 'include' });
+        if (r.ok && !(r.url || '').toLowerCase().includes('login')) {
+          const txt = await r.text();
+          token = extractFromText(txt);
+          if (token) break;
+        }
+      } catch (_) {}
+    }
+  }
+  return token || '__AUTHENTICATED_COOKIE_ONLY__';
+})()
+"#;
+
 async fn probe_cdp_page_session(
     ws_url: &str,
     instance_url: &Url,
     target_host: &str,
-) -> Result<Option<(String, String)>, SncfrError> {
+) -> Result<Option<(String, Option<String>)>, SncfrError> {
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| SncfrError::NetworkOrInstance {
@@ -1010,21 +1344,32 @@ async fn probe_cdp_page_session(
             remediation: None,
         })?;
 
-    // 1. Evaluate `window.g_ck` (ignoring unauthenticated login/redirect pages and `guest` sessions)
+    // 1. Evaluate `CDP_SESSION_PROBE_JS` inside the active ServiceNow tab
     let eval_cmd = json!({
         "id": 1,
         "method": "Runtime.evaluate",
         "params": {
-            "expression": "(() => { const p = (window.location && window.location.pathname) || ''; if (p.includes('login.do') || p.includes('saml_redirector.do') || p.includes('logout')) return null; if (window.NOW && window.NOW.user && window.NOW.user.name === 'guest') return null; const tok = window.g_ck || (window.NOW && window.NOW.g_ck); return (typeof tok === 'string' && tok.length >= 16) ? tok : null; })()",
+            "expression": CDP_SESSION_PROBE_JS,
+            "awaitPromise": true,
             "returnByValue": true
         }
     });
     let _ = ws.send(Message::Text(eval_cmd.to_string().into())).await;
     let eval_resp = read_cdp_response_by_id(&mut ws, 1).await?;
-    let mut g_ck = eval_resp
+    let eval_str = eval_resp
         .pointer("/result/result/value")
         .and_then(Value::as_str)
         .map(str::to_string);
+
+    let mut is_authenticated_cookie_only = false;
+    let mut g_ck = match eval_str.as_deref() {
+        Some("__AUTHENTICATED_COOKIE_ONLY__") => {
+            is_authenticated_cookie_only = true;
+            None
+        }
+        Some(tok) if tok.len() >= 16 => Some(tok.to_string()),
+        _ => None,
+    };
 
     // 2. Fetch all domain cookies via `Network.getCookies`
     let cookies_cmd = json!({
@@ -1074,10 +1419,10 @@ async fn probe_cdp_page_session(
         g_ck = Some(fetched);
     }
 
-    let Some(token) = g_ck else {
+    if g_ck.is_none() && !is_authenticated_cookie_only {
         let _ = ws.close(None).await;
         return Ok(None);
-    };
+    }
 
     // 3. Close the isolated `--app` browser window cleanly
     let close_cmd = json!({
@@ -1088,7 +1433,7 @@ async fn probe_cdp_page_session(
     let _ = ws.send(Message::Text(close_cmd.to_string().into())).await;
     let _ = ws.close(None).await;
 
-    Ok(Some((cookie_header, token)))
+    Ok(Some((cookie_header, g_ck)))
 }
 
 async fn read_cdp_response_by_id<S>(ws: &mut S, expected_id: u64) -> Result<Value, SncfrError>
@@ -1162,17 +1507,28 @@ pub async fn execute_auth_login(
         remediation: None,
     })?;
 
+    cleanup_stale_browser_profile(&profile_dir).await;
+
     let cdp_port = pick_ephemeral_port()?;
     let app_arg = format!("--app={}", resolved.instance_url.as_str());
     let user_data_arg = format!("--user-data-dir={}", profile_dir.display());
     let debug_port_arg = format!("--remote-debugging-port={cdp_port}");
-    let allow_origins_arg = format!("--remote-allow-origins=http://127.0.0.1:{cdp_port}");
+
+    eprintln!(
+        "Launching isolated SSO browser window for '{}' (profile '{}')...",
+        resolved.instance_url, profile_name
+    );
+    eprintln!("  Browser: {}", browser_exe.display());
+    eprintln!(
+        "  Waiting up to {}s for ServiceNow SSO login to complete...",
+        args.timeout_secs
+    );
 
     let mut child = Command::new(&browser_exe)
         .arg(&app_arg)
         .arg(&user_data_arg)
         .arg(&debug_port_arg)
-        .arg(&allow_origins_arg)
+        .arg("--remote-allow-origins=*")
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .stdin(Stdio::null())

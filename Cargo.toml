@@ -1,6 +1,6 @@
 [package]
 name = "sncfr"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Eric Sabetti"]
 description = "Agent-friendly, read-only-by-default ServiceNow CLI for non-admin users"
