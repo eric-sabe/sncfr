@@ -42,7 +42,7 @@ pub struct ApprovalItem {
 }
 
 impl ApprovalItem {
-    fn is_requested(&self) -> bool {
+    pub(crate) fn is_requested(&self) -> bool {
         self.state_value
             .as_deref()
             .unwrap_or(&self.state)
@@ -50,7 +50,7 @@ impl ApprovalItem {
     }
 
     /// True when this approval is assigned to `identity` directly or through one of its groups (APR-4).
-    fn is_linked_to(&self, identity: &CachedIdentity) -> bool {
+    pub(crate) fn is_linked_to(&self, identity: &CachedIdentity) -> bool {
         self.approver_sys_id.as_deref() == Some(identity.sys_id.as_str())
             || self
                 .group_assignment_group
@@ -58,7 +58,7 @@ impl ApprovalItem {
                 .is_some_and(|ag| identity.groups.iter().any(|g| g.sys_id == ag))
     }
 
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         let via = self
             .group
             .as_deref()
@@ -210,7 +210,11 @@ pub async fn execute_approval_action(
 ) -> Result<MutationReport, SncfrError> {
     let show_env = execute_approvals_show(&client, cache, &args.approval_or_ticket).await?;
     let identity = resolve_current_identity(&client, cache, false).await?;
-    let target = select_approval_target(&args.approval_or_ticket, &show_env.items, &identity)?;
+    let target = crate::references::select_approval_target(
+        &args.approval_or_ticket,
+        &show_env.items,
+        &identity,
+    )?;
 
     let new_state_val = if approve { "approved" } else { "rejected" };
     let new_state_disp = if approve { "Approved" } else { "Rejected" };
@@ -287,48 +291,6 @@ pub async fn execute_approval_action(
     };
     gate.fill(&mut report);
     Ok(report)
-}
-
-/// Selects the single approval `approvals approve|reject` may act on (APR-4).
-///
-/// Only approvals in state `requested` that are assigned to the current user, directly or via
-/// one of their assignment groups, are candidates. When the input is itself an approval sys_id,
-/// only that record is considered. Never falls back to another approver's record or a
-/// non-pending one: zero candidates is NOT_FOUND (exit 5) and several are ambiguous (exit 2).
-fn select_approval_target(
-    approval_or_ticket: &str,
-    items: &[ApprovalItem],
-    identity: &CachedIdentity,
-) -> Result<ApprovalItem, SncfrError> {
-    let input = approval_or_ticket.trim();
-    let scoped: Vec<&ApprovalItem> = match items.iter().find(|a| a.sys_id == input) {
-        Some(direct) => vec![direct],
-        None => items.iter().collect(),
-    };
-    let candidates: Vec<&ApprovalItem> = scoped
-        .iter()
-        .copied()
-        .filter(|a| a.is_requested() && a.is_linked_to(identity))
-        .collect();
-
-    match candidates.as_slice() {
-        [only] => Ok((*only).clone()),
-        [] => Err(SncfrError::NoActionableApproval {
-            identifier: input.to_string(),
-            found: scoped.iter().map(|a| a.describe()).collect(),
-        }),
-        many => Err(SncfrError::Validation {
-            message: format!(
-                "'{input}' has {} pending approvals assigned to you; choose one by its approval sys_id",
-                many.len()
-            ),
-            valid_choices: many.iter().map(|a| a.describe()).collect(),
-            remediation: Some(
-                "Re-run with the approval sys_id, e.g. `sncfr approvals approve <approval_sys_id>`."
-                    .to_string(),
-            ),
-        }),
-    }
 }
 
 fn parse_approval_rows(resp: &Value) -> Vec<ApprovalItem> {
@@ -568,14 +530,15 @@ pub async fn execute_catalog_order(
     });
 
     if let Some(req_for) = &args.requested_for {
-        let (disp, user_sys_id) = resolve_user_reference(&client, cache, req_for).await?;
+        let (disp, user_sys_id, ref_source) =
+            resolve_user_reference(&client, cache, req_for).await?;
         diffs.push(FieldDiff {
             field: "requested_for".to_string(),
             before_display: None,
             before_value: None,
             after_display: disp,
             after_value: user_sys_id.clone(),
-            source: Some("user".to_string()),
+            source: Some(ref_source),
             status: Some("verified".to_string()),
             ..Default::default()
         });
