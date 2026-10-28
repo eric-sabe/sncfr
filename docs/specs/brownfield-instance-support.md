@@ -329,7 +329,7 @@ Normative requirements for 0.2.0. MUST / SHOULD / MAY follow RFC 2119, and requi
 ```text
 # Packs (PACK-5, PACK-6)
 sncfr pack validate <path>                  # all problems as file:line:col; exit 0 (warnings ok) or 2
-sncfr pack show [--profile <p>] [-o toml]   # merged ootb+user pack with per-entry origin + sha256
+sncfr pack show [--profile <p>] [--toml]    # merged ootb+user pack with per-entry origin + sha256
 
 # Global (PACK-1, PERF-6)
 --pack <path>            env SNCFR_PACK      # overrides profile `pack =` for facts; safety keys are a strictest union (NA-4)
@@ -497,7 +497,7 @@ The exit-2 `valid_choices` format `"<label> (<value>)"` is pinned by `tests/e2e_
    - Reports **all** problems as `<file>:<line>:<col>: <key>: <message>`.
    - Exits 0 when there are only warnings. Draft status and the complete-set notices (`choices.incident.priority: 6 values; values not listed here are rejected`) are warnings.
    - A draft ends with: `draft: review each "# observed" entry, add values not seen, then set status = "active" to use this pack for writes.`
-3. **`pack show`.** Accepts `--pack <file>` (global) or `--profile`. Every entry is annotated `# origin: ootb | profile | override` and `# workaround: <defect_ref>`. `-o toml` emits a valid, re-loadable pack.
+3. **`pack show`.** Accepts `--pack <file>` (global) or `--profile`. The summary shows each entry's origin (`ootb` | `profile` | `override`) and lists workarounds with their `defect_ref`. `--toml` emits a valid, re-loadable pack.
 4. **Profile `pack =` paths.** `~` is expanded. Relative paths resolve against the directory containing `config.toml`.
 5. **`doctor`.** Exits 0 unless auth or connectivity fails. Draft status, pack drift, instance-binding mismatch, and `not installed` tables are informational lines.
 

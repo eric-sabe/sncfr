@@ -28,6 +28,8 @@ pub struct DoctorReport {
     pub read_only_reason: Option<String>,
     pub identity: CachedIdentity,
     pub capabilities: Vec<CapabilityCheck>,
+    /// Merged Instance Pack identity and active workarounds (PACK-6, PACK-7).
+    pub pack: crate::pack::PackSummary,
 }
 
 /// What sncfr does instead when a well-known probe table is forbidden.
@@ -175,6 +177,7 @@ pub async fn execute_doctor(
         read_only_reason: profile.read_only_lock_reason.clone(),
         identity,
         capabilities,
+        pack: crate::pack::active().summary(),
     })
 }
 
@@ -227,6 +230,14 @@ pub fn format_doctor_report(report: &DoctorReport, format: ResolvedOutputFormat)
                     group_names.join(", ")
                 }
             ));
+            out.push_str(&format!(
+                "- **Instance Pack**: {}\n",
+                report.pack.headline()
+            ));
+            for w in &report.pack.workarounds {
+                out.push_str(&format!("  - workaround: {w}\n"));
+            }
+            out.push('\n');
             out.push_str("## ACL & Endpoint Capability Matrix\n\n");
             out.push_str("| Resource | Status | Accessible | Notes |\n");
             out.push_str("| :--- | :--- | :--- | :--- |\n");
@@ -262,6 +273,10 @@ pub fn format_doctor_report(report: &DoctorReport, format: ResolvedOutputFormat)
                     group_names.join(", ")
                 }
             ));
+            out.push_str(&format!("Instance Pack:   {}\n", report.pack.headline()));
+            for w in &report.pack.workarounds {
+                out.push_str(&format!("  workaround:    {w}\n"));
+            }
             out.push_str(&format!(
                 "Safety Gate:     {}\n\n",
                 if report.read_only_locked {

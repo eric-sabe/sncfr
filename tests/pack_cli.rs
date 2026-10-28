@@ -149,3 +149,55 @@ fn invalid_pack_fails_with_pack_invalid_and_location() {
     assert!(stderr.contains("PACK_INVALID"), "{stderr}");
     assert!(stderr.contains("profile.pack.toml:4:"), "{stderr}");
 }
+
+#[test]
+fn pack_show_and_validate_work_without_authentication() {
+    // PACK-5 / PACK-6: both run before any credential lookup, so the credentials-file ban does
+    // not block them.
+    let dir = setup("");
+    let out = run(dir.path(), &["--json", "pack", "show"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let shown: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(shown["name"], "example-corp");
+    assert!(
+        shown["hash"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:")
+    );
+    assert_eq!(shown["safety"]["allow_credentials_file"], false);
+    assert_eq!(shown["layers"][1]["origin"], "profile");
+
+    let pack = dir.path().join("profile.pack.toml");
+    let out = run(
+        dir.path(),
+        &["pack", "validate", pack.to_str().expect("utf8")],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("valid (0 warnings)"));
+
+    // `pack validate` still runs when the *profile's* pack is broken.
+    fs::write(
+        &pack,
+        "schema_version = 1\npack_version = \"1\"\nname = \"x\"\n[groups]\nsuffixes = [\"work\"]\n",
+    )
+    .expect("break pack");
+    let out = run(
+        dir.path(),
+        &["pack", "validate", pack.to_str().expect("utf8")],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("suffix `work`"), "{stderr}");
+    assert!(stderr.contains("profile.pack.toml:5:"), "{stderr}");
+}
