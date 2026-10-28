@@ -97,7 +97,8 @@ pub async fn execute_stats(
     };
     let (table, eq, unverified_filters) =
         compile_table_and_query(client, cache, &args.filters, saved_view).await?;
-    let query_str = eq.build();
+    let plan = crate::query::plan_open_rules(crate::pack::active(), &table, &args.filters)?;
+    let query_str = eq.build_with(&plan);
     let group_field = args.by.field_name();
 
     let mut params = vec![
@@ -189,13 +190,14 @@ pub async fn execute_feed(
 
     let (table, mut eq, unverified_filters) =
         compile_table_and_query(client, cache, &args.filters, saved_view).await?;
+    let plan = crate::query::plan_open_rules(crate::pack::active(), &table, &args.filters)?;
     if args.filters.updated_since.is_none() {
         eq.gte("sys_updated_on", &since_gmt);
     }
-    let mut query_str = eq.build();
+    let mut query_str = eq.build_with(&plan);
     if !query_str.contains("ORDERBY") {
         eq.order_by_desc("sys_updated_on");
-        query_str = eq.build();
+        query_str = eq.build_with(&plan);
     }
 
     let limit_str = args.filters.limit.to_string();

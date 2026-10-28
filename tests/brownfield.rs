@@ -610,3 +610,28 @@ async fn hyphenated_ticket_numbers_resolve_and_keep_their_separator() {
         .collect();
     assert!(sent.iter().any(|q| q == "number=ABC-1234567"), "{sent:?}");
 }
+
+#[tokio::test]
+async fn open_applies_the_packs_rule_and_reports_it() {
+    // CT-36 (e2e)
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&["--json", "list", "--table", "incident", "--open"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let env = out.json();
+    assert!(
+        env["query"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("active=true^stateNOT IN6,7,8"),
+        "{}",
+        env["query"]
+    );
+    assert_eq!(env["open_rules"][0]["workaround"], true);
+
+    let literal = corp.run(&["-o", "md", "list", "--table", "incident", "--active"]);
+    assert!(
+        literal.stdout.contains("--active is literal active=true"),
+        "{}",
+        literal.stdout
+    );
+}
