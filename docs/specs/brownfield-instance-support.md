@@ -60,7 +60,7 @@ The aim is generic mechanisms (packs, discovery, an agent skill overlay) that le
 - The ticket parser rejects `ABC-1234567` and upper-cases the number it sends (`src/resolve.rs:31-46`). A 403 on a known-prefix table becomes NOT_FOUND (`src/resolve.rs:239,258`).
 - Approvals are user-linked only. Catalog `show`/`order` have no fallback, and `order` returns only the REQ.
 - SKILL.md embeds the user's display name and group names unsanitized (`src/skill.rs:45-56`).
-- CI runs only fmt, clippy, and tests. There is no CONTRIBUTING.md, fixtures use `acme.service-now.com`, SPEC says v0.1.0 and calls `/api/now/batch` "enabled by default", and ADR-0001 doesn't describe the ephemeral CDP port that is already implemented (`src/auth.rs:1167`).
+- CI runs only fmt, clippy, and tests. There is no CONTRIBUTING.md, fixtures use a non-allowlisted `acme` example hostname, SPEC says v0.1.0 and calls `/api/now/batch` "enabled by default", and ADR-0001 doesn't describe the ephemeral CDP port that is already implemented (`src/auth.rs:1167`).
 
 Where the built-in defaults live today:
 

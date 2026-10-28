@@ -124,7 +124,7 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 ### 1. Authenticate via Corporate SSO & Probe Permissions
 ```bash
 # Launches an isolated --app window in your managed browser, captures session + g_ck token into OS Keychain, and closes automatically
-sncfr auth login --instance https://your-instance.service-now.com --profile prod
+sncfr auth login --instance https://mycompany.service-now.com --profile prod
 
 # Or import a "Copy as cURL" snippet from browser DevTools in headless environments
 pbpaste | sncfr auth import --profile prod
@@ -143,7 +143,7 @@ sncfr list --mine --active
 sncfr list --group @my-groups --active --updated-since 7d
 
 # Adopt any filtered list URL copied from the ServiceNow browser address bar
-sncfr list --from-url "https://your-instance.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3Dactive%3Dtrue"
+sncfr list --from-url "https://mycompany.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3Dactive%3Dtrue"
 
 # Fast server-side counts grouped by state (/api/now/stats)
 sncfr stats --group @my-groups --active --by state

@@ -250,12 +250,12 @@ mod tests {
     #[test]
     fn formats_osc8_clickable_terminal_hyperlink() {
         let link = osc8_link(
-            "https://acme.service-now.com/nav_to.do?uri=incident.do?sys_id=123",
+            "https://example.service-now.com/nav_to.do?uri=incident.do?sys_id=123",
             "INC0010042",
         );
         assert_eq!(
             link,
-            "\x1b]8;;https://acme.service-now.com/nav_to.do?uri=incident.do?sys_id=123\x1b\\INC0010042\x1b]8;;\x1b\\"
+            "\x1b]8;;https://example.service-now.com/nav_to.do?uri=incident.do?sys_id=123\x1b\\INC0010042\x1b]8;;\x1b\\"
         );
         assert!(link.contains("INC0010042"));
     }

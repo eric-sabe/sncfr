@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn auth_expired_envelope_includes_remediation_and_exit_code() {
         let err = SncfrError::AuthExpired {
-            instance: "https://acme.service-now.com".to_string(),
+            instance: "https://example.service-now.com".to_string(),
         };
         let env = err.to_envelope();
         assert_eq!(env.error.code, ErrorCode::AuthExpired);

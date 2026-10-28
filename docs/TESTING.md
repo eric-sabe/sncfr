@@ -26,11 +26,11 @@ sncfr --help
 
 ## Phase 1: Corporate SSO Authentication & Capability Probe (Read-Only)
 
-Replace `https://your-instance.service-now.com` with your actual ServiceNow URL (or short subdomain `your-instance`).
+Replace `https://mycompany.service-now.com` with your actual ServiceNow URL (or short subdomain `mycompany`).
 
 ### 1.1 Interactive Corporate SSO Login (`sncfr auth login`)
 ```bash
-sncfr -v auth login --instance https://your-instance.service-now.com --profile prod
+sncfr -v auth login --instance https://mycompany.service-now.com --profile prod
 ```
 *(Tip: Pass `-v` / `--verbose` or `--log-file /tmp/sncfr-debug.log` on any command to inspect real-time browser discovery, CDP session probing, Keychain reads/writes, and HTTP status codes.)*
 - **What to observe**:

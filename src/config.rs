@@ -387,14 +387,14 @@ mod tests {
 
     #[test]
     fn normalizes_instance_urls_and_rejects_non_https_remote() {
-        let (url, key) = normalize_instance_url("acme").expect("shorthand");
-        assert_eq!(url.as_str(), "https://acme.service-now.com/");
-        assert_eq!(key, "acme.service-now.com");
+        let (url, key) = normalize_instance_url("example").expect("shorthand");
+        assert_eq!(url.as_str(), "https://example.service-now.com/");
+        assert_eq!(key, "example.service-now.com");
 
         let (url2, key2) =
-            normalize_instance_url("https://acme.service-now.com/now/nav/ui").expect("full url");
-        assert_eq!(url2.as_str(), "https://acme.service-now.com/");
-        assert_eq!(key2, "acme.service-now.com");
+            normalize_instance_url("https://example.service-now.com/now/nav/ui").expect("full url");
+        assert_eq!(url2.as_str(), "https://example.service-now.com/");
+        assert_eq!(key2, "example.service-now.com");
 
         // Loopback HTTP allowed for wiremock tests
         let (mock_url, mock_key) =
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(mock_key, "127.0.0.1_45678");
 
         // Remote HTTP rejected
-        let err = normalize_instance_url("http://acme.service-now.com").unwrap_err();
+        let err = normalize_instance_url("http://example.service-now.com").unwrap_err();
         assert_eq!(err.code().exit_code(), 2);
     }
 
@@ -479,11 +479,11 @@ team-triage = { table = "incident", query = "assignment_group.name=Cloud Platfor
 
         // Ad-hoc instance when config is empty
         let empty = AppConfig::default();
-        let cli = Cli::try_parse_from(["sncfr", "--instance", "pdi99999", "doctor"])
+        let cli = Cli::try_parse_from(["sncfr", "--instance", "mycompany", "doctor"])
             .expect("parse adhoc");
         let resolved = empty.resolve_profile(&cli).expect("resolve adhoc");
         assert_eq!(resolved.name, "adhoc");
-        assert_eq!(resolved.instance_key, "pdi99999.service-now.com");
+        assert_eq!(resolved.instance_key, "mycompany.service-now.com");
         assert!(!resolved.is_read_only_locked());
 
         // Passing both `--profile <new_name>` and `--instance <url>` succeeds for initial `auth login`
@@ -492,7 +492,7 @@ team-triage = { table = "incident", query = "assignment_group.name=Cloud Platfor
             "auth",
             "login",
             "--instance",
-            "https://acme.service-now.com",
+            "https://example.service-now.com",
             "--profile",
             "prod",
         ])
@@ -501,6 +501,6 @@ team-triage = { table = "incident", query = "assignment_group.name=Cloud Platfor
             .resolve_profile(&new_profile_cli)
             .expect("resolve new profile with explicit instance");
         assert_eq!(new_resolved.name, "prod");
-        assert_eq!(new_resolved.instance_key, "acme.service-now.com");
+        assert_eq!(new_resolved.instance_key, "example.service-now.com");
     }
 }
