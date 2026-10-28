@@ -136,7 +136,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number, with one 
     - `--mine` (`assigned_to=@me` or `caller_id=@me` / `opened_by=@me` / `requested_for=@me`)
     - `--assigned-to <user|@me|unassigned>`
     - `--opened-by <user|@me>`
-    - `--group <group|@my-groups>`
+    - `--group <group|@my-groups>` (alias `--assignment-group`; Q-4, Q-5): with pack `groups.suffixes`, a name expands to itself plus each suffix (`--group Network` → `assignment_group.nameINNetwork,Network - L2,Network - L3`), and Markdown/terminal output shows `group: Network → … (suffix expansion)` as a footer. A name containing a comma cannot go in an `IN` list, so it is sent as an `assignment_group.name=…^OR…` chain. `update`/`create` accept `--assignment-group` and `--assign-to-group` as aliases of `--group`.
     - `--watch-list <user|@me>`
     - `--active` / `--inactive` (always literal `active=true` / `active=false`; a note is printed when the table has a pack open rule) / `--state <state,...>`
     - `--open` / `--closed` (Q-2, Q-3): the Instance Pack's `open_rule.<table>` / `closed_rule.<table>` where defined, else `active=true` / `active=false`. `--closed` exits `2` when the table has only an `open_rule`. On `task` with no `task`-level rule, each child table with a rule gets its own `^NQ` block, and the rest use the fallback. Envelopes list the applied rules (`open_rules[]`, with workaround and `defect_ref`), and Markdown/terminal output shows them as a footer.
