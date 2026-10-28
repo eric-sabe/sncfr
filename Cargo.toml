@@ -33,6 +33,7 @@ thiserror = "2.0"
 tokio = { version = "1.40", features = ["full"] }
 tokio-tungstenite = "0.26"
 toml = "0.8"
+unicode-general-category = "1.0"
 url = { version = "2.5", features = ["serde"] }
 
 [dev-dependencies]

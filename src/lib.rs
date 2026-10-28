@@ -16,6 +16,7 @@ pub mod query;
 pub mod resolve;
 pub mod schema;
 pub mod skill;
+pub mod untrusted;
 pub mod workflows;
 
 use crate::cli::Cli;

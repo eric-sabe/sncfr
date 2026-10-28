@@ -874,7 +874,12 @@ Exactly one → target. Zero → exit 5 listing the non-actionable approvals wit
 - It rejects (exit 2 `INVALID_QUERY_VALUE`) `^`, CR, LF, NUL, and case-insensitive `javascript:`. Values bound for `IN` lists are also rejected when they contain `,` (callers switch to `^OR` chains).
 - `sys_idIN` operands must match `^[0-9a-f]{32}$`, otherwise they are shown as "(unresolved)".
 - Table names entering a path (from packs, recipes, `item_option_new.reference`, `sys_number`, `link` URLs) must match `^[a-z0-9_]{1,80}$`.
-- `QueryBuilder` becomes internal to `TableQuery` (introduced in 2.2 as the single read builder; P4 adds its default parameters). `TableQuery::raw()` is reserved for pack `open_rule`/`closed_rule`/`custom` fragments that already passed PACK-5 validation, and for the user's own `--query` / `--from-url`.
+- **Implementation (2.2).** The guard sits at two choke points instead of a separate `TableQuery` type:
+  - every `EncodedQuery` value method checks its value and `compile_list_filters` / `search` call `validate()`;
+  - the few hand-formatted lookups (user, group, ticket number) call `query_value` directly;
+  - `ReadOnlyClient::endpoint_url`, which every request (read or mutating) goes through, applies the table-name rule and the origin assert.
+
+  P4 adds the default read parameters at the same client choke point. `EncodedQuery::raw()` is reserved for pack `open_rule`/`closed_rule`/`custom` fragments that already passed PACK-5 validation, and for the user's own `--query` / `--from-url`.
 - `endpoint_url` rejects any joined URL whose origin ≠ the `base_url` origin.
 
 ### Capability record (CAP-1, 2, 4, 6)

@@ -24,13 +24,18 @@ pub enum ErrorCode {
     NetworkOrInstanceError,
     /// Exit code 2: An Instance Pack failed to parse or validate (ADR-0004).
     PackInvalid,
+    /// Exit code 2: A value would change the structure of an encoded query (NA-13).
+    InvalidQueryValue,
 }
 
 impl ErrorCode {
     /// Deterministic exit code per `docs/SPEC.md` Section 6.2.
     pub const fn exit_code(self) -> u8 {
         match self {
-            Self::InvalidArgs | Self::ValidationError | Self::PackInvalid => 2,
+            Self::InvalidArgs
+            | Self::ValidationError
+            | Self::PackInvalid
+            | Self::InvalidQueryValue => 2,
             Self::AuthExpired | Self::AuthRequired => 3,
             Self::AclForbidden => 4,
             Self::NotFound => 5,
@@ -51,6 +56,7 @@ impl ErrorCode {
             Self::ReadOnlyLocked => "READ_ONLY_LOCKED",
             Self::NetworkOrInstanceError => "NETWORK_OR_INSTANCE_ERROR",
             Self::PackInvalid => "PACK_INVALID",
+            Self::InvalidQueryValue => "INVALID_QUERY_VALUE",
         }
     }
 }
@@ -98,6 +104,9 @@ pub enum SncfrError {
     #[error("Mutation blocked: profile or environment is locked to read-only mode ({reason})")]
     ReadOnlyLocked { reason: String },
 
+    #[error("Value '{value}' cannot be used in a ServiceNow query: {reason}")]
+    InvalidQueryValue { value: String, reason: String },
+
     #[error("Invalid Instance Pack '{pack}':\n  {}", .problems.join("\n  "))]
     PackInvalid { pack: String, problems: Vec<String> },
 
@@ -139,6 +148,7 @@ impl SncfrError {
             Self::ReadOnlyLocked { .. } => ErrorCode::ReadOnlyLocked,
             Self::NetworkOrInstance { .. } => ErrorCode::NetworkOrInstanceError,
             Self::PackInvalid { .. } => ErrorCode::PackInvalid,
+            Self::InvalidQueryValue { .. } => ErrorCode::InvalidQueryValue,
         }
     }
 
@@ -170,6 +180,9 @@ impl SncfrError {
                     .to_string(),
             ),
             Self::NetworkOrInstance { remediation, .. } => remediation.clone(),
+            Self::InvalidQueryValue { .. } => Some(
+                "Pass the plain value only (no `^`, line breaks, or `javascript:`). For complex filters use `--query`, which is sent as you write it.".to_string(),
+            ),
             Self::PackInvalid { pack, .. } => Some(format!(
                 "Fix the listed problems, then check with `sncfr pack validate {pack}`."
             )),

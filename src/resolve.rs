@@ -170,7 +170,10 @@ async fn query_ticket_in_table(
     canonical_number: &str,
 ) -> Result<Option<ResolvedTicket>, SncfrError> {
     let path = format!("/api/now/table/{table}");
-    let q = format!("number={canonical_number}");
+    let q = format!(
+        "number={}",
+        crate::untrusted::query_value(canonical_number)?
+    );
     let query = [
         ("sysparm_query", q.as_str()),
         ("sysparm_limit", "1"),

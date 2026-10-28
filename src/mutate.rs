@@ -565,6 +565,7 @@ pub async fn resolve_user_reference(
         return Ok((trimmed.to_string(), trimmed.to_string()));
     }
 
+    let trimmed = crate::untrusted::query_value(trimmed)?;
     let q = format!("user_name={trimmed}^ORemail={trimmed}^ORname={trimmed}");
     let resp: Value = client
         .get_json(
@@ -624,6 +625,7 @@ pub async fn resolve_group_reference(
         return Ok((found.name.clone(), found.sys_id.clone()));
     }
 
+    let trimmed = crate::untrusted::query_value(trimmed)?;
     let q = format!("name={trimmed}");
     let resp: Value = client
         .get_json(
@@ -841,14 +843,16 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
                 out.push_str("## Field Changes (Before -> After)\n\n");
                 out.push_str("| Field | Before | After | Raw Value |\n");
                 out.push_str("| :--- | :--- | :--- | :--- |\n");
+                // Before values come from the instance and after values from the caller (often
+                // an agent): neither may add table cells, rows, or escapes (NA-9).
                 for d in &report.diffs {
                     let before = d.before_display.as_deref().unwrap_or("(new/append)");
                     out.push_str(&format!(
                         "| `{}` | {} | **{}** | `{}` |\n",
-                        d.field,
-                        before.replace('\n', " "),
-                        d.after_display.replace('\n', " "),
-                        d.after_value.replace('\n', " ")
+                        crate::untrusted::inline(&d.field),
+                        crate::untrusted::inline(before),
+                        crate::untrusted::inline(&d.after_display),
+                        crate::untrusted::inline(&d.after_value)
                     ));
                 }
                 out.push('\n');
@@ -908,12 +912,14 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
                     .set_content_arrangement(ContentArrangement::Dynamic)
                     .set_width(width)
                     .set_header(vec!["FIELD", "BEFORE", "AFTER", "RAW_VALUE"]);
+                // No instance- or caller-supplied text reaches the terminal with control or
+                // escape sequences, which could rewrite or hide lines of the preview (NA-9).
                 for d in &report.diffs {
                     table.add_row(vec![
-                        d.field.as_str(),
-                        d.before_display.as_deref().unwrap_or("(none)"),
-                        d.after_display.as_str(),
-                        d.after_value.as_str(),
+                        crate::untrusted::clean(&d.field),
+                        crate::untrusted::clean(d.before_display.as_deref().unwrap_or("(none)")),
+                        crate::untrusted::clean(&d.after_display),
+                        crate::untrusted::clean(&d.after_value),
                     ]);
                 }
                 out.push_str(&table.to_string());
@@ -1072,5 +1078,40 @@ mod tests {
             .expect("committed update");
         assert_eq!(committed.mode, "committed");
         assert!(committed.commit_command.is_none());
+    }
+
+    #[test]
+    fn previews_strip_terminal_escapes_and_markdown_structure_from_values() {
+        // CT-45b: an instance "Before" value tries to erase the line above and set the clipboard.
+        let report = MutationReport {
+            mode: "dry_run".to_string(),
+            operation: "update".to_string(),
+            ticket: Some("INC0012345".to_string()),
+            table: "incident".to_string(),
+            sys_id: None,
+            ui_url: None,
+            diffs: vec![FieldDiff {
+                field: "short_description".to_string(),
+                before_display: Some("ok\u{1b}[1A\u{1b}[2K\u{1b}]52;c;Zm9v\u{7}".to_string()),
+                before_value: None,
+                after_display: "new | forged | cell\n## heading".to_string(),
+                after_value: "x".to_string(),
+            }],
+            attachments: vec![],
+            commit_command: None,
+        };
+        for format in [
+            ResolvedOutputFormat::Table,
+            ResolvedOutputFormat::TerminalDossier,
+        ] {
+            let out = format_mutation_report(&report, format);
+            assert!(!out.contains("\u{1b}[1A"), "{out:?}");
+            assert!(!out.contains("\u{1b}]52"), "{out:?}");
+            assert!(!out.contains('\u{7}'), "{out:?}");
+        }
+        let md = format_mutation_report(&report, ResolvedOutputFormat::Md);
+        assert!(!md.contains('\u{1b}'));
+        assert!(!md.contains("\n## heading"));
+        assert!(md.contains("new \\| forged \\| cell"), "{md}");
     }
 }
