@@ -11,6 +11,29 @@ pub const DYNAMIC_ME_SYS_ID: &str = "90d1921e5f510100a9ad2572f2b477fe";
 /// Standard ServiceNow Dynamic Filter Option `sys_id` for "One of My Groups" (`getMyGroups()`).
 pub const DYNAMIC_MY_GROUPS_SYS_ID: &str = "d6435e965f510100a9ad2572f2b47744";
 
+/// `name` plus each of the pack's `groups.suffixes` appended (Q-5): `Network` →
+/// `Network`, `Network - L2`, `Network - L3`.
+pub fn expand_group_names(pack: &crate::pack::MergedPack, name: &str) -> Vec<String> {
+    std::iter::once(name.to_string())
+        .chain(pack.groups.suffixes.iter().map(|s| format!("{name}{s}")))
+        .collect()
+}
+
+/// The footer note for a suffix-expanded `--group` filter, if any.
+pub fn group_expansion_note(
+    pack: &crate::pack::MergedPack,
+    filters: &ListFilterArgs,
+) -> Option<String> {
+    let g = filters.group.as_deref()?.trim();
+    if g.eq_ignore_ascii_case("@my-groups") || is_sys_id(g) || pack.groups.suffixes.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "group: {g} → {} (suffix expansion)",
+        expand_group_names(pack, g).join(", ")
+    ))
+}
+
 /// Strongly-typed fluent builder for ServiceNow encoded query strings (`sysparm_query`).
 ///
 /// Reference: `ServiceNow/ServiceNowDocs` -> `c_EncodedQueryStrings.md` & `r_OpAvailableFiltersQueries.md`.
@@ -723,7 +746,28 @@ pub fn compile_list_filters(
         } else if is_sys_id(trimmed) {
             eq.equals("assignment_group", trimmed);
         } else {
-            eq.equals("assignment_group.name", trimmed);
+            let names = expand_group_names(crate::pack::active(), trimmed);
+            match names.as_slice() {
+                // No suffixes configured: exactly the 0.1.x query.
+                [only] => {
+                    eq.equals("assignment_group.name", only);
+                }
+                many if many.iter().any(|n| crate::untrusted::needs_or_chain(n)) => {
+                    for n in many {
+                        crate::untrusted::query_value(n)?;
+                    }
+                    eq.raw(
+                        &many
+                            .iter()
+                            .map(|n| format!("assignment_group.name={n}"))
+                            .collect::<Vec<_>>()
+                            .join("^OR"),
+                    );
+                }
+                many => {
+                    eq.in_list("assignment_group.name", many);
+                }
+            }
         }
     }
 
