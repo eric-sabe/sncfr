@@ -23,6 +23,7 @@
 - [`docs/SPEC.md`](docs/SPEC.md) — Authoritative product and technical specification for `sncfr`.
 - [`docs/PLAN.md`](docs/PLAN.md) — Phased implementation roadmap, milestones, and current status tracker.
 - [`docs/TESTING.md`](docs/TESTING.md) — Step-by-step functional testing & live instance smoke-test guide.
+- [`docs/specs/`](docs/specs/) — Release design specs (engsys Tier M/L format): normative requirement IDs, contracts, `NA-*` security invariants, `CT-*` test tables, and phase plans. Current: [`brownfield-instance-support.md`](docs/specs/brownfield-instance-support.md) (0.2.0).
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records (ADRs) capturing the rationale behind core design choices:
   - [`docs/adr/0001-cdp-isolated-browser-sso.md`](docs/adr/0001-cdp-isolated-browser-sso.md) — Corporate SSO via CDP-driven isolated managed browser window + OS Keychain.
   - [`docs/adr/0002-read-only-default-validated-dry-run.md`](docs/adr/0002-read-only-default-validated-dry-run.md) — Compile-time Read-Only safety gate & Validated Dry-Run Previews.
