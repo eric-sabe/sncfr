@@ -1,4 +1,3 @@
-use crate::auth::resolve_current_identity;
 use crate::cache::InstanceCache;
 use crate::cli::{AttachArgs, CommentArgs, CreateArgs, UpdateArgs};
 use crate::client::write_gate::{ResolvedField, Target, VerifiedMutation, WriteOutcome};
@@ -7,7 +6,7 @@ use crate::client::{
 };
 use crate::error::SncfrError;
 use crate::output::{ResolvedOutputFormat, osc8_link};
-use crate::resolve::{is_sys_id, load_or_sync_prefixes, resolve_table_name, resolve_ticket};
+use crate::resolve::{load_or_sync_prefixes, resolve_table_name, resolve_ticket};
 use crate::resolve_value::{ResolveCtx, ResolvedValue, resolve_choice, resolve_field};
 use crate::schema::load_or_sync_table_schema;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
@@ -345,7 +344,8 @@ pub async fn execute_update(
 
     // 2. User & Group Reference fields (`assigned_to`, `assignment_group`)
     if let Some(assign_to) = &args.assign_to {
-        let (after_disp, after_val) = resolve_user_reference(&client, cache, assign_to).await?;
+        let (after_disp, after_val, ref_source) =
+            resolve_user_reference(&client, cache, assign_to).await?;
         let before = extract_field_pair(&resolved.record, "assigned_to");
         diffs.push(FieldDiff {
             field: "assigned_to".to_string(),
@@ -353,7 +353,7 @@ pub async fn execute_update(
             before_value: before.as_ref().map(|b| b.1.clone()),
             after_display: after_disp.clone(),
             after_value: after_val.clone(),
-            source: Some("user".to_string()),
+            source: Some(ref_source.clone()),
             status: Some("verified".to_string()),
             ..Default::default()
         });
@@ -365,7 +365,8 @@ pub async fn execute_update(
     }
 
     if let Some(group) = &args.group {
-        let (after_disp, after_val) = resolve_group_reference(&client, cache, group).await?;
+        let (after_disp, after_val, ref_source) =
+            resolve_group_reference(&client, cache, group).await?;
         let before = extract_field_pair(&resolved.record, "assignment_group");
         diffs.push(FieldDiff {
             field: "assignment_group".to_string(),
@@ -373,7 +374,7 @@ pub async fn execute_update(
             before_value: before.as_ref().map(|b| b.1.clone()),
             after_display: after_disp.clone(),
             after_value: after_val.clone(),
-            source: Some("group".to_string()),
+            source: Some(ref_source.clone()),
             status: Some("verified".to_string()),
             ..Default::default()
         });
@@ -517,14 +518,15 @@ pub async fn execute_create(
     }
 
     if let Some(assign_to) = &args.assign_to {
-        let (after_disp, after_val) = resolve_user_reference(&client, cache, assign_to).await?;
+        let (after_disp, after_val, ref_source) =
+            resolve_user_reference(&client, cache, assign_to).await?;
         diffs.push(FieldDiff {
             field: "assigned_to".to_string(),
             before_display: None,
             before_value: None,
             after_display: after_disp.clone(),
             after_value: after_val.clone(),
-            source: Some("user".to_string()),
+            source: Some(ref_source.clone()),
             status: Some("verified".to_string()),
             ..Default::default()
         });
@@ -536,14 +538,15 @@ pub async fn execute_create(
     }
 
     if let Some(group) = &args.group {
-        let (after_disp, after_val) = resolve_group_reference(&client, cache, group).await?;
+        let (after_disp, after_val, ref_source) =
+            resolve_group_reference(&client, cache, group).await?;
         diffs.push(FieldDiff {
             field: "assignment_group".to_string(),
             before_display: None,
             before_value: None,
             after_display: after_disp.clone(),
             after_value: after_val.clone(),
-            source: Some("group".to_string()),
+            source: Some(ref_source.clone()),
             status: Some("verified".to_string()),
             ..Default::default()
         });
@@ -555,7 +558,8 @@ pub async fn execute_create(
     }
 
     if let Some(caller) = &args.caller {
-        let (after_disp, after_val) = resolve_user_reference(&client, cache, caller).await?;
+        let (after_disp, after_val, ref_source) =
+            resolve_user_reference(&client, cache, caller).await?;
         let caller_field = crate::pack::active().caller_field(&table);
         diffs.push(FieldDiff {
             field: caller_field.to_string(),
@@ -563,7 +567,7 @@ pub async fn execute_create(
             before_value: None,
             after_display: after_disp.clone(),
             after_value: after_val.clone(),
-            source: Some("user".to_string()),
+            source: Some(ref_source.clone()),
             status: Some("verified".to_string()),
             ..Default::default()
         });
@@ -685,117 +689,30 @@ pub async fn execute_attach(
     Ok(report)
 }
 
+/// Resolves a user reference; returns `(display, sys_id, source label)` (see [`crate::references`]).
 pub async fn resolve_user_reference(
     client: &ReadOnlyClient,
     cache: &InstanceCache,
     input: &str,
-) -> Result<(String, String), SncfrError> {
-    let trimmed = input.trim();
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case("none")
-        || trimmed.eq_ignore_ascii_case("unassigned")
-    {
-        return Ok(("(unassigned)".to_string(), String::new()));
-    }
-    if trimmed.eq_ignore_ascii_case("@me") {
-        let identity = resolve_current_identity(client, cache, false).await?;
-        return Ok((identity.display_name, identity.sys_id));
-    }
-    if is_sys_id(trimmed) {
-        return Ok((trimmed.to_string(), trimmed.to_string()));
-    }
-
-    let trimmed = crate::untrusted::query_value(trimmed)?;
-    let q = format!("user_name={trimmed}^ORemail={trimmed}^ORname={trimmed}");
-    let resp: Value = client
-        .get_json(
-            "/api/now/table/sys_user",
-            &[
-                ("sysparm_query", q.as_str()),
-                ("sysparm_limit", "2"),
-                ("sysparm_display_value", "all"),
-                ("sysparm_fields", "sys_id,name,user_name"),
-            ],
-        )
-        .await?;
-
-    if let Some(first) = resp
-        .get("result")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        && let Some(sys_id) = extract_field_value(first, "sys_id")
-    {
-        let disp = extract_field_display(first, "name").unwrap_or_else(|| sys_id.clone());
-        return Ok((disp, sys_id));
-    }
-
-    Err(SncfrError::Validation {
-        message: format!("Could not resolve user reference '{trimmed}' in sys_user"),
-        valid_choices: vec![],
-        remediation: Some(
-            "Pass `@me`, `none`, a valid ServiceNow username/email, or a 32-character user `sys_id`."
-                .to_string(),
-        ),
-    })
+) -> Result<(String, String, String), SncfrError> {
+    let m = crate::references::resolve_user(client, cache, input).await?;
+    Ok((m.name.clone(), m.sys_id.clone(), m.source_label("user")))
 }
 
+/// Resolves a group reference; returns `(display, sys_id, source label)` (see [`crate::references`]).
 pub async fn resolve_group_reference(
     client: &ReadOnlyClient,
     cache: &InstanceCache,
     input: &str,
-) -> Result<(String, String), SncfrError> {
-    let trimmed = input.trim();
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case("none")
-        || trimmed.eq_ignore_ascii_case("unassigned")
+) -> Result<(String, String, String), SncfrError> {
+    let m = crate::references::resolve_group(client, cache, input).await?;
+    let mut source = m.source_label("group");
+    if let Some(s) = &m.suggestion
+        && s != &m.name
     {
-        return Ok(("(unassigned)".to_string(), String::new()));
+        source.push_str(&format!("; note: pack suggests \"{s}\""));
     }
-    if is_sys_id(trimmed) {
-        return Ok((trimmed.to_string(), trimmed.to_string()));
-    }
-
-    // Check cached `@my-groups` first
-    if let Ok(Some(identity)) = cache.read_identity()
-        && let Some(found) = identity
-            .groups
-            .iter()
-            .find(|g| g.name.eq_ignore_ascii_case(trimmed))
-    {
-        return Ok((found.name.clone(), found.sys_id.clone()));
-    }
-
-    let trimmed = crate::untrusted::query_value(trimmed)?;
-    let q = format!("name={trimmed}");
-    let resp: Value = client
-        .get_json(
-            "/api/now/table/sys_user_group",
-            &[
-                ("sysparm_query", q.as_str()),
-                ("sysparm_limit", "2"),
-                ("sysparm_display_value", "all"),
-                ("sysparm_fields", "sys_id,name"),
-            ],
-        )
-        .await?;
-
-    if let Some(first) = resp
-        .get("result")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        && let Some(sys_id) = extract_field_value(first, "sys_id")
-    {
-        let disp = extract_field_display(first, "name").unwrap_or_else(|| sys_id.clone());
-        return Ok((disp, sys_id));
-    }
-
-    Err(SncfrError::Validation {
-        message: format!("Could not resolve assignment group '{trimmed}' in sys_user_group"),
-        valid_choices: vec![],
-        remediation: Some(
-            "Pass an exact ServiceNow group name or a 32-character group `sys_id`.".to_string(),
-        ),
-    })
+    Ok((m.name.clone(), m.sys_id.clone(), source))
 }
 
 fn resolve_message_body(args: &CommentArgs) -> Result<String, SncfrError> {
