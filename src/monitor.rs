@@ -1,5 +1,6 @@
 use crate::auth::resolve_current_identity;
 use crate::cache::InstanceCache;
+use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
 use crate::cli::{AttachmentsArgs, FeedArgs, ListFilterArgs, StatsArgs};
 use crate::client::{ReadOnlyClient, extract_field_display, extract_field_value};
 use crate::config::{ResolvedProfile, SavedView};
@@ -84,6 +85,18 @@ pub struct AttachmentsEnvelope {
     pub downloaded: Vec<DownloadedAttachment>,
 }
 
+/// Records `stats_group_by` from a `group_by` stats read (used by resolution step 3).
+fn observe_stats(cache: &InstanceCache, state: CapState, status: u16, hint: Option<CapHint>) {
+    CapabilityRecord::observe(
+        cache,
+        Capability::StatsGroupBy,
+        state,
+        CapSource::Observed,
+        Some(status),
+        hint,
+    );
+}
+
 /// Executes `sncfr stats [@<view>] [--by <field>] [flags]` against `/api/now/stats/{table}`.
 pub async fn execute_stats(
     profile: &ResolvedProfile,
@@ -111,7 +124,16 @@ pub async fn execute_stats(
     }
 
     let path = format!("/api/now/stats/{table}");
-    let resp: Value = client.get_json(&path, &params).await?;
+    let resp: Value = match client.get_json(&path, &params).await {
+        Ok(v) => v,
+        Err(e) => {
+            if matches!(e, SncfrError::AclForbidden { .. }) {
+                observe_stats(cache, CapState::Unauthorized, 403, Some(CapHint::Acl));
+            }
+            return Err(e);
+        }
+    };
+    observe_stats(cache, CapState::Available, 200, None);
 
     let mut buckets = Vec::new();
     let mut total_count = 0u64;

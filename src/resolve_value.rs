@@ -223,7 +223,7 @@ pub struct ResolveCtx<'a> {
     pub schema: &'a CachedTableSchema,
     /// The target record (update) or a sample row (create), `sysparm_display_value=all`.
     pub sample: Option<&'a Value>,
-    /// In-use sets from the Aggregate API (DISC-2), keyed by field. `None` until discovery lands.
+    /// In-use sets from the Aggregate API (DISC-2), keyed by field ([`discover_in_use`]).
     pub discovered: Option<&'a BTreeMap<String, Vec<CachedChoice>>>,
 }
 
@@ -518,7 +518,7 @@ pub fn resolve_choice(
         });
     }
 
-    // 3. In-use (discovered) set — filled in by DISC-2; `None` until then.
+    // 3. In-use (discovered) set (DISC-2, DISC-3): it cannot prove a value doesn't exist.
     if let Some(found) = ctx
         .discovered
         .and_then(|d| d.get(field))
@@ -608,6 +608,197 @@ pub fn resolve_field(
             Vec::new(),
         )),
     }
+}
+
+/// Dictionary types that are never probed for in-use values, even when listed (DISC-2 scope).
+const NOT_DISCOVERABLE: &[&str] = &[
+    "reference",
+    "string",
+    "html",
+    "journal",
+    "journal_input",
+    "journal_list",
+    "translated_text",
+    "translated_html",
+    "email",
+    "url",
+    "phone_number",
+    "ph_number",
+    "phone_number_e164",
+    "multi_two_lines",
+];
+
+impl ResolveCtx<'_> {
+    /// Whether resolution would reach step 3 for `field`: no pack set and no complete instance
+    /// set, the field is `Choice`-typed and listed in `discovery.choice_fields`, and nothing marks
+    /// it as a reference or free text.
+    pub fn wants_discovery(&self, field: &str) -> bool {
+        if self.pack_set(field, false).is_some()
+            || self.instance_set(field).is_some()
+            || !self.in_discovery_list(field)
+            || self.classify(field) != FieldType::Choice
+        {
+            return false;
+        }
+        let excluded_type = self.schema.fields.get(field).and_then(|m| {
+            (m.internal_type == "inferred_reference"
+                || NOT_DISCOVERABLE.contains(&m.internal_type.as_str()))
+            .then_some(m.internal_type.as_str())
+        });
+        let sampled_link = self
+            .sample
+            .and_then(|s| s.get(field))
+            .and_then(|v| v.get("link"))
+            .is_some();
+        if let Some(t) = excluded_type.or(sampled_link.then_some("inferred_reference")) {
+            crate::debug_log!(
+                "discovery",
+                "{}.{field} is listed in discovery.choice_fields but typed {t}; not probed",
+                self.table
+            );
+            return false;
+        }
+        true
+    }
+}
+
+/// In-use choice sets for one table, cached in `discovered/<table>.json`. Always incomplete:
+/// values never used on the instance are missing (DISC-3). A field probed with no rows is kept as
+/// an empty set so a re-run inside the TTL sends no request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredSets {
+    /// Always `discovered`.
+    pub source: String,
+    /// Always `false`.
+    pub complete: bool,
+    #[serde(default)]
+    pub fields: BTreeMap<String, Vec<CachedChoice>>,
+}
+
+fn discovered_path(table: &str) -> std::path::PathBuf {
+    std::path::Path::new("discovered").join(format!("{table}.json"))
+}
+
+/// `(value, label)` pairs for `field` in an Aggregate API `group_by` response (labels only;
+/// counts are not kept).
+pub fn parse_in_use(resp: &Value, field: &str) -> Vec<CachedChoice> {
+    let mut out: Vec<CachedChoice> = Vec::new();
+    for item in resp
+        .get("result")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(gf) = item
+            .get("groupby_fields")
+            .and_then(Value::as_array)
+            .and_then(|g| {
+                g.iter()
+                    .find(|f| f.get("field").and_then(Value::as_str) == Some(field))
+            })
+        else {
+            continue;
+        };
+        let value = gf.get("value").and_then(Value::as_str).unwrap_or_default();
+        if value.is_empty() || out.iter().any(|c| c.value == value) {
+            continue;
+        }
+        let label = gf
+            .get("display_value")
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
+            .unwrap_or(value);
+        out.push(CachedChoice {
+            label: label.to_string(),
+            value: value.to_string(),
+            sequence: None,
+        });
+    }
+    out
+}
+
+/// Step 3's input (DISC-2): in-use sets for each of `fields` that [`ResolveCtx::wants_discovery`],
+/// from `discovered/<table>.json` within its TTL, else one
+/// `/api/now/stats/<table>?sysparm_group_by=<field>` request per field. A capability record of
+/// `stats_group_by` other than available/unknown skips the request. Observes `stats_group_by`.
+pub async fn discover_in_use(
+    client: &crate::client::ReadOnlyClient,
+    cache: &crate::cache::InstanceCache,
+    ctx: &ResolveCtx<'_>,
+    fields: &[&str],
+) -> Result<BTreeMap<String, Vec<CachedChoice>>, SncfrError> {
+    use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
+    let wanted: Vec<&str> = fields
+        .iter()
+        .copied()
+        .filter(|f| ctx.wants_discovery(f))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let path = discovered_path(ctx.table);
+    let mut sets: DiscoveredSets = cache.read_fresh(&path).ok().flatten().unwrap_or_default();
+    let mut changed = false;
+    for field in &wanted {
+        if sets.fields.contains_key(*field) {
+            continue;
+        }
+        if !crate::capabilities::state(cache, Capability::StatsGroupBy).worth_trying() {
+            break;
+        }
+        let stats_path = format!("/api/now/stats/{}", ctx.table);
+        match client
+            .get_json::<Value>(
+                &stats_path,
+                &[
+                    ("sysparm_count", "true"),
+                    ("sysparm_group_by", field),
+                    ("sysparm_display_value", "all"),
+                ],
+            )
+            .await
+        {
+            Ok(resp) => {
+                CapabilityRecord::observe(
+                    cache,
+                    Capability::StatsGroupBy,
+                    CapState::Available,
+                    CapSource::Observed,
+                    Some(200),
+                    None,
+                );
+                sets.fields
+                    .insert((*field).to_string(), parse_in_use(&resp, field));
+                changed = true;
+            }
+            Err(e @ (SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. })) => {
+                return Err(e);
+            }
+            Err(SncfrError::AclForbidden { .. }) => {
+                CapabilityRecord::observe(
+                    cache,
+                    Capability::StatsGroupBy,
+                    CapState::Unauthorized,
+                    CapSource::Observed,
+                    Some(403),
+                    Some(CapHint::Acl),
+                );
+                break;
+            }
+            // Anything else (a missing table, 5xx, timeout) leaves step 3 without a set this run.
+            Err(_) => {}
+        }
+    }
+    if changed {
+        sets.source = "discovered".to_string();
+        sets.complete = false;
+        let _ = cache.write_entry(&path, &sets, crate::cache::DEFAULT_SCHEMA_TTL_SECS);
+    }
+    Ok(sets
+        .fields
+        .into_iter()
+        .filter(|(f, _)| wanted.contains(&f.as_str()))
+        .collect())
 }
 
 /// A read filter value that could not be verified; it is sent as typed and reported in-band
@@ -700,12 +891,22 @@ pub async fn resolve_read_filters(
     }
     let pack = crate::pack::active();
     let schema = crate::schema::load_or_sync_table_schema(client, cache, table, false).await?;
-    let ctx = ResolveCtx {
+    let probe = ResolveCtx {
         pack,
         table,
         schema: &schema,
         sample: None,
         discovered: None,
+    };
+    let wanted: Vec<&str> = [("state", &filters.state), ("priority", &filters.priority)]
+        .iter()
+        .filter(|(_, inputs)| !inputs.is_empty())
+        .map(|(f, _)| *f)
+        .collect();
+    let discovered = discover_in_use(client, cache, &probe, &wanted).await?;
+    let ctx = ResolveCtx {
+        discovered: Some(&discovered),
+        ..probe
     };
     let children: Vec<(String, CachedTableSchema)> =
         if table == "task" {
@@ -917,7 +1118,7 @@ values = [
 
     #[test]
     fn row7_no_metadata_is_unverifiable_with_the_literal_value() {
-        // CT-08d (and row 5's interim outcome until discovery lands)
+        // CT-08d
         let r = resolve(&pack(None), &schema(&[]), "low").expect("resolve");
         assert_eq!(r.unverifiable(), Some(UnverifiableReason::NoMetadata));
         assert_eq!(r.value(), "low");
@@ -1092,5 +1293,51 @@ values = [
             }
         );
         assert_eq!(ctx.classify("u_odd"), FieldType::Reference { table: None });
+    }
+
+    #[test]
+    fn in_use_sets_parse_labels_and_skip_non_choice_types() {
+        // DISC-2 scope: only Choice-typed listed fields are probed.
+        let resp = json!({ "result": [
+            { "stats": { "count": "4" }, "groupby_fields": [{ "field": "priority", "value": "5", "display_value": "5 - Low" }] },
+            { "stats": { "count": "1" }, "groupby_fields": [{ "field": "priority", "value": "", "display_value": "" }] },
+            { "stats": { "count": "2" }, "groupby_fields": [{ "field": "priority", "value": "2" }] },
+        ]});
+        let set = parse_in_use(&resp, "priority");
+        assert_eq!(
+            pairs(&set),
+            vec![
+                ("5".to_string(), "5 - Low".to_string()),
+                ("2".to_string(), "2".to_string())
+            ]
+        );
+
+        let p = pack(None);
+        let mut s = schema(&[]);
+        s.fields.insert(
+            "close_code".to_string(),
+            crate::cache::CachedFieldMeta {
+                label: "Resolution code".to_string(),
+                internal_type: "string".to_string(),
+                mandatory: false,
+                max_length: None,
+                reference_table: None,
+                is_custom: false,
+            },
+        );
+        let ctx = ResolveCtx {
+            pack: &p,
+            table: "incident",
+            schema: &s,
+            sample: None,
+            discovered: None,
+        };
+        assert!(ctx.wants_discovery("priority"));
+        assert!(
+            !ctx.wants_discovery("close_code"),
+            "string-typed: not probed"
+        );
+        assert!(!ctx.wants_discovery("assigned_to"), "reference: not probed");
+        assert!(!ctx.wants_discovery("u_tier"), "not listed");
     }
 }
