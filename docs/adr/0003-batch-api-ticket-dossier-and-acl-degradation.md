@@ -30,3 +30,13 @@ Meanwhile, raw Table API responses return 100+ columns (mostly empty or internal
 - Reduces latency from 5–6 sequential HTTP calls to 1–2 round-trips.
 - Cuts token consumption by ~90% compared to raw Table API JSON while providing significantly richer ticket context.
 - Works seamlessly across both high-privilege fulfiller (`itil`) accounts and restricted self-service accounts.
+
+## Amendment (2026-10-28, release 0.2.0)
+
+See [`docs/specs/brownfield-instance-support.md`](../specs/brownfield-instance-support.md) (§Capability record, §Dossier degradation).
+
+- **Batch is an optimization, not the primary path.** `/api/now/batch` is often disabled or unrouted on enterprise instances, so concurrent Table API `GET`s are the normal path. Batch is used only while the per-instance **capability record** (`capabilities.json`, TTL 7 days) says it is `Available` or `Unknown`.
+  - A 400 "URI does not represent any resource" or a 404 records it `Unavailable`, and a 403 records it `Unauthorized`. Later invocations skip it until the TTL expires or `sncfr doctor --refresh` runs.
+  - Transient failures (5xx, 429, timeout) fall back for that call only.
+- **Every dossier section degrades on its own** on `403`, `404`/invalid table, or **timeout**. The section is annotated, JSON carries `sections.<name>.status` and `degraded[]`, and the command still exits 0. Only a failure to fetch the primary record fails the command.
+- **Per-request timeout** is configurable (`--timeout`, `SNCFR_TIMEOUT`, profile `timeout_secs`; 1–300 s, default 30).

@@ -194,6 +194,7 @@ We manage our intent through living specifications, plans, and architecture deci
   - [ADR-0001: Corporate SSO via CDP-Driven Isolated Managed Browser Window](docs/adr/0001-cdp-isolated-browser-sso.md)
   - [ADR-0002: Compile-Time Read-Only Default and Validated Dry-Run Previews](docs/adr/0002-read-only-default-validated-dry-run.md)
   - [ADR-0003: Single-Roundtrip `/api/now/batch` Ticket Dossier & Graceful ACL Degradation](docs/adr/0003-batch-api-ticket-dossier-and-acl-degradation.md)
+  - [ADR-0004: Instance Packs for Brownfield ServiceNow Instances](docs/adr/0004-instance-packs.md)
 
 ---
 

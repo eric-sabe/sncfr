@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check required living documentation files exist
         run: |
-          for f in AGENTS.md README.md docs/SPEC.md docs/PLAN.md; do
+          for f in AGENTS.md README.md docs/SPEC.md docs/PLAN.md docs/specs/brownfield-instance-support.md docs/adr/0004-instance-packs.md; do
             if [ ! -s "$f" ]; then
               echo "Missing or empty required documentation file: $f"
               exit 1

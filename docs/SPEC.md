@@ -19,7 +19,7 @@ ServiceNow's official CLI offerings fail the everyday user and AI agent use case
 
 ## 2. Core Architectural Principles
 
-1. **Zero Instance Plugin Requirement**: Operates exclusively against base-system ServiceNow REST APIs enabled by default (`/api/now/table`, `/api/now/batch`, `/api/now/stats`, `/api/now/attachment`, `/api/sn_sc/servicecatalog`, `/api/sn_chg_rest`).
+1. **Zero Instance Plugin Requirement**: Operates exclusively against base-system ServiceNow REST APIs (`/api/now/table`, `/api/now/stats`, `/api/now/attachment`, `/api/sn_sc/servicecatalog`, `/api/sn_chg_rest`). `/api/now/batch` is an **optional optimization**: it is frequently disabled or restricted on enterprise instances, so its availability is detected at runtime and recorded per instance, and every command works without it (ADR-0003 amendment).
 2. **Read-Only by Default, Write by Explicit Flag (`--write`)**:
    - All exploration/monitoring commands are strictly read-only.
    - Mutating commands (`comment`, `note`, `update`, `create`, `attach`, `approve`) run as **Validated Dry-Run Previews** by default when invoked without `--write`.
