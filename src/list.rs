@@ -24,6 +24,9 @@ pub struct RecordListEnvelope {
     #[serde(skip)]
     pub columns: Vec<String>,
     pub records: Vec<Value>,
+    /// Filter values sent as typed because they could not be verified (Q-1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified_filters: Vec<crate::resolve_value::UnverifiedFilter>,
 }
 
 /// Executes `sncfr list [@<view>] [flags]`.
@@ -109,12 +112,17 @@ async fn execute_filtered_query(
         cache.read_identity().ok().flatten()
     };
 
-    let (compiled_table, mut eq) =
+    let (compiled_table, _) =
         compile_list_filters(filters, saved_view, identity.as_ref(), Utc::now())?;
 
     let prefixes = load_or_sync_prefixes(client, cache, false).await?;
     let raw_table = explicit_table_arg.unwrap_or(&compiled_table);
     let table = resolve_table_name(raw_table, &prefixes);
+    // Q-1: --state / --priority resolve against the target table before the query is built.
+    let (resolved_filters, unverified_filters) =
+        crate::resolve_value::resolve_read_filters(client, cache, &table, filters).await?;
+    let (_, mut eq) =
+        compile_list_filters(&resolved_filters, saved_view, identity.as_ref(), Utc::now())?;
 
     if let Some(text) = search_text {
         eq.text_query(text);
@@ -236,6 +244,7 @@ async fn execute_filtered_query(
         offset: filters.offset,
         columns,
         records: pruned_records,
+        unverified_filters,
     })
 }
 
@@ -284,6 +293,11 @@ pub fn format_record_list(envelope: &RecordListEnvelope, format: ResolvedOutputF
                 "# `{}` ({} records)\n\n- **Query**: `{}`\n\n",
                 envelope.table, envelope.count, envelope.query
             ));
+            out.push_str(&crate::resolve_value::unverified_filter_notes(
+                &envelope.table,
+                &envelope.unverified_filters,
+                envelope.records.is_empty(),
+            ));
             if envelope.records.is_empty() {
                 out.push_str("_No matching records._\n");
                 return out;
@@ -308,9 +322,14 @@ pub fn format_record_list(envelope: &RecordListEnvelope, format: ResolvedOutputF
             out
         }
         ResolvedOutputFormat::Table | ResolvedOutputFormat::TerminalDossier => {
+            let notes = crate::resolve_value::unverified_filter_notes(
+                &envelope.table,
+                &envelope.unverified_filters,
+                envelope.records.is_empty(),
+            );
             if envelope.records.is_empty() {
                 return format!(
-                    "No records found in '{}' matching query `{}`.",
+                    "{notes}No records found in '{}' matching query `{}`.",
                     envelope.table, envelope.query
                 );
             }
@@ -340,7 +359,7 @@ pub fn format_record_list(envelope: &RecordListEnvelope, format: ResolvedOutputF
                 table.add_row(row);
             }
             format!(
-                "{table}\n({} records from '{}', offset={})",
+                "{notes}{table}\n({} records from '{}', offset={})",
                 envelope.count, envelope.table, envelope.offset
             )
         }

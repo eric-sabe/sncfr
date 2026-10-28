@@ -321,3 +321,39 @@ async fn a_suggest_map_entry_is_never_applied() {
     );
     assert!(corp.patch_bodies().await.is_empty());
 }
+
+#[tokio::test]
+async fn read_filters_resolve_per_table_and_flag_what_they_cannot_verify() {
+    // CT-17b (Q-1): unverifiable filters never block a read but are reported in-band.
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&[
+        "--json",
+        "list",
+        "--table",
+        "incident",
+        "--state",
+        "Resolved",
+        "--priority",
+        "low",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let env = out.json();
+    let q = env["query"].as_str().unwrap_or_default();
+    assert!(
+        q.contains("state=Resolved"),
+        "unverified value sent as typed: {q}"
+    );
+    assert!(q.contains("priority=5"), "pack-resolved value sent: {q}");
+    assert_eq!(env["unverified_filters"][0]["field"], "state");
+    assert_eq!(env["unverified_filters"][0]["reason"], "no_metadata");
+
+    let md = corp.run(&[
+        "-o", "md", "list", "--table", "incident", "--state", "Resolved",
+    ]);
+    assert!(
+        md.stdout
+            .contains("⚠ state \"Resolved\" could not be verified for incident"),
+        "{}",
+        md.stdout
+    );
+}

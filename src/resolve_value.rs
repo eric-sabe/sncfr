@@ -604,6 +604,183 @@ pub fn resolve_field(
     }
 }
 
+/// A read filter value that could not be verified; it is sent as typed and reported in-band
+/// (Q-1). UNVERIFIABLE never blocks a read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnverifiedFilter {
+    pub field: String,
+    pub input: String,
+    pub sent: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+}
+
+impl ResolveCtx<'_> {
+    /// True when the pack or the instance defines a choice set for `field` on this table (or,
+    /// for the pack, an ancestor).
+    pub fn defines(&self, field: &str) -> bool {
+        self.instance_set(field).is_some() || self.pack_set(field, false).is_some()
+    }
+}
+
+/// Q-1 for a `task`-level query with no `task`-level definition: every child table whose set is
+/// known must agree on the value, or the query is ambiguous (exit 2, naming the tables).
+/// Returns `None` when no child defines the field.
+pub fn resolve_across_children(
+    pack: &MergedPack,
+    field: &str,
+    input: &str,
+    children: &[(String, CachedTableSchema)],
+) -> Result<Option<ResolvedValue>, SncfrError> {
+    let mut outcomes: Vec<(String, Option<ResolvedValue>)> = Vec::new();
+    for (table, schema) in children {
+        let ctx = ResolveCtx {
+            pack,
+            table,
+            schema,
+            sample: None,
+            discovered: None,
+        };
+        if !ctx.defines(field) {
+            continue;
+        }
+        match resolve_choice(&ctx, field, input) {
+            Ok(v) if v.unverifiable().is_none() => outcomes.push((table.clone(), Some(v))),
+            Ok(_) => {}
+            Err(_) => outcomes.push((table.clone(), None)),
+        }
+    }
+    let Some((_, first)) = outcomes.first() else {
+        return Ok(None);
+    };
+    let agree = outcomes.iter().all(|(_, v)| match (v, first) {
+        (Some(a), Some(b)) => a.value() == b.value(),
+        _ => false,
+    });
+    if agree {
+        return Ok(first.clone());
+    }
+    Err(SncfrError::Validation {
+        message: format!(
+            "'{input}' means different things for '{field}' across task tables; filter one table with --table"
+        ),
+        valid_choices: outcomes
+            .iter()
+            .map(|(t, v)| match v {
+                Some(v) => format!("{t}: {} ({})", v.display(), v.value()),
+                None => format!("{t}: no such value"),
+            })
+            .collect(),
+        remediation: Some(format!(
+            "Re-run with `--table <table>` so '{field}' has one meaning."
+        )),
+    })
+}
+
+/// Resolves `--state` / `--priority` for a read against `table` (Q-1). Verified values replace
+/// the input; unverifiable ones are sent as typed and returned for in-band reporting; ambiguity
+/// and divergence are exit 2.
+pub async fn resolve_read_filters(
+    client: &crate::client::ReadOnlyClient,
+    cache: &crate::cache::InstanceCache,
+    table: &str,
+    filters: &crate::cli::ListFilterArgs,
+) -> Result<(crate::cli::ListFilterArgs, Vec<UnverifiedFilter>), SncfrError> {
+    let mut resolved = filters.clone();
+    let mut unverified = Vec::new();
+    if filters.state.is_empty() && filters.priority.is_empty() {
+        return Ok((resolved, unverified));
+    }
+    let pack = crate::pack::active();
+    let schema = crate::schema::load_or_sync_table_schema(client, cache, table, false).await?;
+    let ctx = ResolveCtx {
+        pack,
+        table,
+        schema: &schema,
+        sample: None,
+        discovered: None,
+    };
+    let children: Vec<(String, CachedTableSchema)> =
+        if table == "task" {
+            pack.hierarchy
+                .iter()
+                .filter(|(_, parent)| parent.value == "task")
+                .map(|(child, _)| {
+                    // Pack sets or the schema cache only: no extra request per child table.
+                    let s = cache.read_table_schema(child).ok().flatten().unwrap_or(
+                        CachedTableSchema {
+                            table: child.clone(),
+                            super_class: Some("task".to_string()),
+                            fields: BTreeMap::new(),
+                            choices: BTreeMap::new(),
+                            loaded_from_cache: true,
+                        },
+                    );
+                    (child.clone(), s)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    for (field, inputs, out) in [
+        ("state", &filters.state, &mut resolved.state),
+        ("priority", &filters.priority, &mut resolved.priority),
+    ] {
+        out.clear();
+        for input in inputs {
+            let value = if table == "task" && !ctx.defines(field) {
+                match resolve_across_children(pack, field, input, &children)? {
+                    Some(v) => v,
+                    None => resolve_choice(&ctx, field, input)?,
+                }
+            } else {
+                resolve_choice(&ctx, field, input)?
+            };
+            if let Some(reason) = value.unverifiable() {
+                unverified.push(UnverifiedFilter {
+                    field: field.to_string(),
+                    input: input.clone(),
+                    sent: value.value().to_string(),
+                    reason: reason.as_str().to_string(),
+                    candidates: value
+                        .candidates()
+                        .iter()
+                        .map(|(v, l)| format!("{l} ({v})"))
+                        .collect(),
+                });
+            }
+            out.push(value.value().to_string());
+        }
+    }
+    Ok((resolved, unverified))
+}
+
+/// The in-band warning lines for unverified filters (Markdown and terminal output).
+pub fn unverified_filter_notes(table: &str, filters: &[UnverifiedFilter], empty: bool) -> String {
+    let mut out = String::new();
+    for f in filters {
+        let known = if f.candidates.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Known values: {}.",
+                crate::untrusted::inline(&f.candidates.join(", "))
+            )
+        };
+        out.push_str(&format!(
+            "⚠ {} \"{}\" could not be verified for {table} ({}); results may be incomplete or empty.{known}\n",
+            f.field,
+            crate::untrusted::inline(&f.input),
+            f.reason
+        ));
+    }
+    if empty && !filters.is_empty() {
+        out.push_str("0 results; the filter above could not be verified.\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,6 +978,55 @@ values = [
         s.loaded_from_cache = true;
         let r = resolve(&pack(None), &s, "2 - High").expect("resolve");
         assert_eq!(r.source(), Some(ValueSource::Cache));
+    }
+
+    #[test]
+    fn task_level_filters_must_mean_the_same_on_every_child_table() {
+        // CT-17 (Q-1)
+        let p = pack(None);
+        let mk = |table: &str, rows: &[(&str, &str)]| {
+            let mut s = schema(&[]);
+            s.table = table.to_string();
+            s.choices.insert(
+                "state".to_string(),
+                rows.iter()
+                    .map(|(v, l)| CachedChoice {
+                        value: (*v).to_string(),
+                        label: (*l).to_string(),
+                        sequence: None,
+                    })
+                    .collect(),
+            );
+            (table.to_string(), s)
+        };
+        let diverging = [
+            mk("incident", &[("6", "Resolved")]),
+            mk("sc_req_item", &[("3", "Closed Complete")]),
+        ];
+        let err = resolve_across_children(&p, "state", "Resolved", &diverging).unwrap_err();
+        let SncfrError::Validation { valid_choices, .. } = err else {
+            panic!()
+        };
+        assert!(valid_choices.iter().any(|c| c == "incident: Resolved (6)"));
+        assert!(
+            valid_choices
+                .iter()
+                .any(|c| c == "sc_req_item: no such value")
+        );
+
+        let agreeing = [
+            mk("incident", &[("6", "Resolved")]),
+            mk("problem", &[("6", "Resolved")]),
+        ];
+        let v = resolve_across_children(&p, "state", "resolved", &agreeing)
+            .unwrap()
+            .expect("value");
+        assert_eq!(v.value(), "6");
+        assert!(
+            resolve_across_children(&p, "state", "x", &[])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
