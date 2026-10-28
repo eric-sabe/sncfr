@@ -28,3 +28,26 @@ Meanwhile:
 - Inherits full corporate device posture, client certificates, and password-manager/SSO extensions from the managed browser.
 - Avoids touching or decrypting the user's personal browser profile SQLite databases.
 - Keeps re-authentication fast because the isolated browser profile retains IdP device-trust cookies across sessions.
+
+## Amendment (2026-10-28, release 0.2.0): CDP port lifecycle and credential storage risks
+
+**CDP debugging port.** This describes the current behavior, not a change.
+
+- The port is ephemeral. `sncfr` asks the OS for a free loopback port (`127.0.0.1:0`), releases it, and launches the browser with `--remote-debugging-port=<port>`. Chromium binds the debugging endpoint to loopback only by default, and `sncfr` never passes `--remote-debugging-address`.
+- The port lives only for the login window. Once a verified non-guest session and `g_ck` are captured, `sncfr` sends CDP `Browser.close`, then kills the child process if it is still running. No debugging port outlives `sncfr auth login`.
+- The browser profile (`~/.local/share/sncfr/browser-profile/<instance>`) is isolated from the user's daily profile, and it persists IdP cookies so later logins are fast.
+- **Residual risks:**
+  - CDP has no authentication. While the login window is open, any process running as the same OS user, or able to reach loopback, can attach to the port and read cookies. This is accepted because it is the same trust level as the user's own session, and the window is short-lived.
+  - There is a short race between `sncfr` releasing the port and Chromium binding it. If another process takes the port, the CDP handshake fails and login aborts. It never connects to a foreign endpoint.
+
+**`SNCFR_CREDENTIALS_FILE`.** This is the headless fallback when no OS keychain daemon exists.
+
+- The session bundle (cookies + `g_ck`, or API key/basic/bearer material) is stored as **plaintext JSON**, protected only by file mode `0600` set on write. Risks:
+  - the file is readable by root and by any process running as the user
+  - it lands in backups, dotfile syncs, and container image layers if placed carelessly
+  - on multi-user or shared CI hosts, a file mode is the only barrier
+- **Guidance:** prefer the OS keychain. Use the file only on single-purpose hosts or ephemeral containers. Point it at a tmpfs or secret mount, never at a path inside a repository, and delete it with `sncfr auth logout` when done.
+- **Organization control (0.2.0):** an Instance Pack may set `[auth] allow_credentials_file = false`.
+  - Because pack safety keys are a strictest union across layers (ADR-0004), any loaded layer setting it wins.
+  - With it set, every command, including each `auth` subcommand, exits 2 before opening, reading, creating, or writing the file named by `SNCFR_CREDENTIALS_FILE`.
+  - To make that guarantee hold, the pack is loaded before the credential store is selected.
