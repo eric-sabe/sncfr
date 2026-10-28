@@ -972,7 +972,7 @@ pub struct RequestPolicy { pub timeout: Duration,        // 1..=300 s: --timeout
 
 ### Identifiers (ID-1..4)
 
-`split_ticket_prefix` → `parse_ticket(raw) -> TicketId { prefix: String /* upper, for lookup */, original: String /* trimmed, unchanged, sent to number= */ }`. It accepts `^[A-Za-z_]+-?\d+$` (one optional `-`).
+`split_ticket_prefix` accepts `^[A-Za-z_]+-?\d+$` (one optional `-`). The prefix (upper-case, `-` stripped) is used for lookup, and the number is sent to `number=` with its separator kept. **Implementation note (5.2):** the number is upper-cased as in 0.1.x. An existing test pins that, and ServiceNow numbers are upper-case, so "unchanged" in ID-2 is read as "separator preserved".
 
 - **Prefix map:** merged pack ⊕ `sys_number` (when readable) ⊕ learned prefixes.
 - **Learned prefixes** are stored under a separate `learned` key in `prefixes.json` and survive resync (fixes `src/resolve.rs:81`).

@@ -115,7 +115,7 @@ All subcommands accept the following global flags:
 
 ### 5.1 Ticket Prefix Auto-Resolution
 
-Commands that accept a `<TICKET>` identifier accept any ticket number (case-insensitive, e.g., `INC0010042`, `ritm0049210`, `CHG0031002`, `SCTASK0019283`, `PRB0010011`, `REQ0010200`, `CS0010400`, or custom prefixes like `SEC0010099`):
+Commands that accept a `<TICKET>` identifier accept any ticket number, with one optional `-` between prefix and digits (e.g. `ABC-1234567`; the separator is kept in the `number=` query, ID-2) (case-insensitive, e.g., `INC0010042`, `ritm0049210`, `CHG0031002`, `SCTASK0019283`, `PRB0010011`, `REQ0010200`, `CS0010400`, or custom prefixes like `SEC0010099`):
 1. Looks up the prefix in the effective prefix map (ID-1): the `ootb` pack's defaults, overridden by `sys_number` (when readable), then by prefixes learned from step 3, then by the user pack's `[prefixes]`. Learned prefixes survive a `sys_number` resync.
 2. Queries the resolved specific table (e.g., `incident`, `sc_req_item`, `change_request`) by `number=<TICKET>`.
 3. If the prefix is unknown or missing from `sys_number`, queries the base `task` table (`number=<TICKET>`) to discover `sys_class_name` (the concrete child table) and `sys_id`, then fetches the full child-table record.

@@ -185,6 +185,7 @@ impl ExampleCorp {
         self.get("sys_user_grmember", identity["sys_user_grmember"].clone())
             .await;
         self.get("incident", fixture("incident.json")).await;
+        self.get("u_abc_request", fixture("abc_request.json")).await;
         self.get("sys_choice", json!({ "result": [] })).await;
         self.get("sys_dictionary", json!({ "result": [] })).await;
         Mock::given(method("GET"))
