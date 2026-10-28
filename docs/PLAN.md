@@ -1,7 +1,7 @@
 # `sncfr` Implementation Plan & Roadmap
 
-- **Status**: Completed (Milestones 0–5 Delivered)
-- **Last Updated**: 2026-10-22
+- **Status**: Milestones 0–5 delivered (0.1.x); Milestones 6–10 planned for 0.2.0
+- **Last Updated**: 2026-10-28
 - **Governing Spec**: [`docs/SPEC.md`](SPEC.md)
 - **GitHub Repository**: [`eric-sabe/sncfr`](https://github.com/eric-sabe/sncfr)
 - **GitHub Project Board**: [`sncfr Roadmap` (Project #40)](https://github.com/users/eric-sabe/projects/40)
@@ -82,3 +82,25 @@
 - [x] **[#17 — Dry-Run: Reconstruct exact copy-pasteable `--write` `commit_command` from CLI args](https://github.com/eric-sabe/sncfr/issues/17)**
 - [x] **[#18 — Output: Add OSC 8 clickable terminal hyperlinks and status color-coding in TTY table/dossier views](https://github.com/eric-sabe/sncfr/issues/18)**
 - [x] **[#19 — Auth: Unify interactive `401 AuthExpired` auto-reauth retry across all subcommands](https://github.com/eric-sabe/sncfr/issues/19)**
+
+---
+
+## Release 0.2.0: Brownfield Instance Support (Planned — Milestones 6–10)
+
+- **Design spec (Tier L)**: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md). It holds the normative requirement IDs, the contracts, the `NA-*` security invariants, the `CT-*` test table, and the full phase/issue breakdown.
+- **Delivery**: one phase = one PR to `main`, and one issue = one commit. `main` carries `0.2.0-dev` until P10 tags `v0.2.0`.
+
+| Milestone | Phases | Requirements |
+|---|---|---|
+| 0.1.6 (hotfix) | H: approvals target fix | APR-4 |
+| M6 Safety & Packs | P0 Docs, ADRs & leakcheck · P1 Pack core · P2 Values & write gate · P2.5 References & read filters | DOC-1…4, HYG-1…3, PACK-1…9, SAFE-1…7, Q-1, BF-TEST-1/2ab/3/4 |
+| M7 Capabilities & Performance | P3 Capabilities & HTTP · P4 Query performance | CAP-1…6, SAFE-9, PERF-1…6, BF-TEST-2cd |
+| M8 Discovery & Identifiers | P5 Identifiers & open rules · P6 Discovery | ID-1…4, Q-2…5, DISC-1…5, BF-TEST-2f |
+| M9 Dossier, Approvals, Catalog | P7 Dossier, approvals & marker · P8 Catalog resilience | DOS-1/2, APR-1…3, SAFE-8, CAT-1…4, BF-TEST-2e |
+| M10 Workflows & Skills | P9 cmdb & recipes · P9.5 Triage · P10 Skill & release | WF-1…4, TRI-1…7, SKILL-1…4 |
+
+Order: H → P0 → P1 → P2 → P2.5 → P5 → P9/P9.5 → P10. P3 → P4 → P6 branch off P2, and P7 → P8 off P2.5 + P4. There are 48 items in all; the spec's item table gives each one's priority, owner, risk, dependencies, and test cases.
+
+**Hotfix 0.1.6 (approved):** `approvals approve|reject <ticket>` currently acts on the first pending approval on the ticket, whoever the approver is (`src/workflows.rs:162-185`). APR-4 restricts the target to the caller's own pending approval. No release tags exist yet, so H.1 also tags `v0.1.5` at `51d640e`.
+
+GitHub milestones and issues will be linked here once they are created.
