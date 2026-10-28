@@ -531,3 +531,43 @@ async fn table_reads_never_ask_for_counts_and_list_reads_skip_reference_links() 
         );
     }
 }
+
+#[tokio::test]
+async fn list_reports_has_more_without_counting_and_a_total_only_on_request() {
+    // PERF-2
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&["--json", "list", "--table", "incident", "--limit", "1"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["has_more"], true);
+    assert!(out.json().get("total").is_none());
+
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/now/table/incident"))
+        .and(wiremock::matchers::query_param("sysparm_no_count", "false"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("X-Total-Count", "42")
+                .set_body_string(
+                    std::fs::read_to_string(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/fixtures/example-corp/incident.json"),
+                    )
+                    .expect("fixture"),
+                ),
+        )
+        .with_priority(1)
+        .mount(&corp.server)
+        .await;
+    let counted = corp.run(&[
+        "--json",
+        "list",
+        "--table",
+        "incident",
+        "--limit",
+        "1",
+        "--with-count",
+    ]);
+    assert_eq!(counted.code, 0, "{}", counted.stderr);
+    assert_eq!(counted.json()["total"], 42);
+    assert_eq!(counted.json()["has_more"], true);
+}

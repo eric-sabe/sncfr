@@ -314,6 +314,11 @@ pub struct ListFilterArgs {
     #[arg(long, default_value_t = 0)]
     pub offset: u32,
 
+    /// Also return the total number of matching records (asks the instance to count, which can be
+    /// slow on very large tables; `stats` is the cheaper count path)
+    #[arg(long)]
+    pub with_count: bool,
+
     /// Field name to sort by (default: `sys_updated_on`)
     #[arg(long)]
     pub sort: Option<String>,
