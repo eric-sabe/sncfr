@@ -138,7 +138,8 @@ Commands that accept a `<TICKET>` identifier accept any ticket number, with one 
     - `--opened-by <user|@me>`
     - `--group <group|@my-groups>`
     - `--watch-list <user|@me>`
-    - `--active` / `--inactive` / `--state <state,...>`
+    - `--active` / `--inactive` (always literal `active=true` / `active=false`; a note is printed when the table has a pack open rule) / `--state <state,...>`
+    - `--open` / `--closed` (Q-2, Q-3): the Instance Pack's `open_rule.<table>` / `closed_rule.<table>` where defined, else `active=true` / `active=false`. `--closed` exits `2` when the table has only an `open_rule`. On `task` with no `task`-level rule, each child table with a rule gets its own `^NQ` block, and the rest use the fallback. Envelopes list the applied rules (`open_rules[]`, with workaround and `defect_ref`), and Markdown/terminal output shows them as a footer.
     - `--priority <1..5,...>`
     - `--state` / `--priority` values resolve per target table through the same chain as mutations (§4.2, Q-1). A `task`-level query with no `task`-level definition requires every child table with a known set (pack or schema cache) to agree, else exit `2` naming the tables. Values that can't be verified are sent as typed and reported in-band (a ⚠ line above the results; envelope `unverified_filters[]`); this never blocks a read.
     - `--updated-since <duration|timestamp>` (e.g., `4h`, `2d`, `2026-10-20`)

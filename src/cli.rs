@@ -278,6 +278,14 @@ pub struct ListFilterArgs {
     #[arg(long, conflicts_with = "active")]
     pub inactive: bool,
 
+    /// Only open tickets: the Instance Pack's `open_rule.<table>` where defined, else `active=true`
+    #[arg(long, conflicts_with_all = ["active", "inactive", "closed"])]
+    pub open: bool,
+
+    /// Only closed tickets: the pack's `closed_rule.<table>` where defined, else `active=false`
+    #[arg(long, conflicts_with_all = ["active", "inactive", "open"])]
+    pub closed: bool,
+
     /// Filter by one or more state labels or codes (comma-separated)
     #[arg(long, value_delimiter = ',')]
     pub state: Vec<String>,
