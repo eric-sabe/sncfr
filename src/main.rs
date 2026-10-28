@@ -12,7 +12,7 @@ use sncfr::cli::{
 };
 use sncfr::client::{ReadOnlyClient, WritePermit};
 use sncfr::config::{AppConfig, ResolvedProfile};
-use sncfr::doctor::{execute_doctor, format_doctor_report};
+use sncfr::doctor::format_doctor_report;
 use sncfr::dossier::{assemble_ticket_dossier, format_ticket_dossiers};
 use sncfr::error::SncfrError;
 use sncfr::list::{execute_list, execute_search, execute_table, format_record_list};
@@ -414,8 +414,15 @@ async fn execute_authenticated_command(
             render_auth_status(&summary, resolved_output);
             Ok(String::new())
         }
-        Commands::Doctor => {
-            let report = execute_doctor(&profile, &client, &cache).await?;
+        Commands::Doctor(args) => {
+            let report = sncfr::doctor::execute_doctor_with(
+                &profile,
+                &client,
+                &cache,
+                sncfr::pack::active(),
+                args.refresh,
+            )
+            .await?;
             Ok(format_doctor_report(&report, resolved_output))
         }
         Commands::Show(args) => {
