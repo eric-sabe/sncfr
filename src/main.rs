@@ -522,7 +522,8 @@ async fn prepare_read_context(
     let cache = InstanceCache::for_instance(&profile.instance_key)?;
     let client =
         resolve_authenticated_client(cli, config, &profile, &store, is_stdin_tty, is_stdout_tty)
-            .await?;
+            .await?
+            .with_cache(cache.clone());
     Ok((profile, cache, client))
 }
 
