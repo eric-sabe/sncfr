@@ -68,8 +68,13 @@ fn marker_ok(m: &str) -> bool {
         && !m.to_ascii_lowercase().contains("[code]")
 }
 
-fn suffix_ok(s: &str) -> bool {
+/// A group-name suffix: 1-32 characters, starting with a space, `-`, `_`, or `/`.
+pub fn suffix_ok(s: &str) -> bool {
     (1..=32).contains(&s.chars().count()) && s.starts_with([' ', '-', '_', '/'])
+}
+
+fn is_comment(line: &str) -> bool {
+    line.trim_start().starts_with('#')
 }
 
 /// Best-effort source location for a dotted key path: the most specific `[header]` that
@@ -93,7 +98,7 @@ fn locate(text: &str, path: &[&str]) -> (usize, usize) {
                     if header_of(l).is_some() {
                         break;
                     }
-                    if let Some(col) = l.find(next) {
+                    if let Some(col) = l.find(next).filter(|_| !is_comment(l)) {
                         return (j + 1, col + 1);
                     }
                 }
@@ -103,7 +108,7 @@ fn locate(text: &str, path: &[&str]) -> (usize, usize) {
     }
     if let Some(last) = path.last() {
         for (j, l) in lines.iter().enumerate() {
-            if let Some(col) = l.find(last) {
+            if let Some(col) = l.find(last).filter(|_| !is_comment(l)) {
                 return (j + 1, col + 1);
             }
         }
@@ -440,6 +445,12 @@ mod tests {
             "[core]\nknown_free_text = [\"priority\"]\n",
             "known_free_text",
         );
+    }
+
+    #[test]
+    fn locations_skip_comment_lines() {
+        let text = "# set status = \"active\" later\nschema_version = 1\nstatus = \"draft\"\n";
+        assert_eq!(locate(text, &["status"]), (3, 1));
     }
 
     #[test]

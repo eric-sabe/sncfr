@@ -633,11 +633,17 @@ impl ResolveCtx<'_> {
     /// set, the field is `Choice`-typed and listed in `discovery.choice_fields`, and nothing marks
     /// it as a reference or free text.
     pub fn wants_discovery(&self, field: &str) -> bool {
-        if self.pack_set(field, false).is_some()
-            || self.instance_set(field).is_some()
-            || !self.in_discovery_list(field)
-            || self.classify(field) != FieldType::Choice
-        {
+        self.pack_set(field, false).is_none()
+            && self.instance_set(field).is_none()
+            && self.discoverable(field)
+    }
+
+    /// Whether `field` may be probed for in-use values at all (DISC-2 scope): listed in
+    /// `discovery.choice_fields` (task-inherited), `Choice`-typed, and not marked as a reference
+    /// or free text by the dictionary or the sample. `discover` uses this directly, since it
+    /// describes the instance rather than the pack.
+    pub fn discoverable(&self, field: &str) -> bool {
+        if !self.in_discovery_list(field) || self.classify(field) != FieldType::Choice {
             return false;
         }
         let excluded_type = self.schema.fields.get(field).and_then(|m| {
@@ -727,26 +733,38 @@ pub async fn discover_in_use(
     ctx: &ResolveCtx<'_>,
     fields: &[&str],
 ) -> Result<BTreeMap<String, Vec<CachedChoice>>, SncfrError> {
-    use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
     let wanted: Vec<&str> = fields
         .iter()
         .copied()
         .filter(|f| ctx.wants_discovery(f))
         .collect();
+    fetch_in_use(client, cache, ctx.table, &wanted).await
+}
+
+/// In-use sets for `fields` of `table`: cached entries within the TTL, else one stats request per
+/// field. A field whose in-use values are sys_ids is a reference, not a choice, and is kept as an
+/// empty set so no names reach the cache.
+pub async fn fetch_in_use(
+    client: &crate::client::ReadOnlyClient,
+    cache: &crate::cache::InstanceCache,
+    table: &str,
+    wanted: &[&str],
+) -> Result<BTreeMap<String, Vec<CachedChoice>>, SncfrError> {
+    use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
     if wanted.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let path = discovered_path(ctx.table);
+    let path = discovered_path(table);
     let mut sets: DiscoveredSets = cache.read_fresh(&path).ok().flatten().unwrap_or_default();
     let mut changed = false;
-    for field in &wanted {
+    for field in wanted {
         if sets.fields.contains_key(*field) {
             continue;
         }
         if !crate::capabilities::state(cache, Capability::StatsGroupBy).worth_trying() {
             break;
         }
-        let stats_path = format!("/api/now/stats/{}", ctx.table);
+        let stats_path = format!("/api/now/stats/{table}");
         match client
             .get_json::<Value>(
                 &stats_path,
@@ -767,8 +785,15 @@ pub async fn discover_in_use(
                     Some(200),
                     None,
                 );
-                sets.fields
-                    .insert((*field).to_string(), parse_in_use(&resp, field));
+                let mut set = parse_in_use(&resp, field);
+                if set.iter().any(|c| crate::untrusted::is_sys_id(&c.value)) {
+                    crate::debug_log!(
+                        "discovery",
+                        "{table}.{field}: in-use values are sys_ids (a reference); not kept"
+                    );
+                    set.clear();
+                }
+                sets.fields.insert((*field).to_string(), set);
                 changed = true;
             }
             Err(e @ (SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. })) => {

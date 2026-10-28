@@ -425,6 +425,13 @@ async fn execute_authenticated_command(
             .await?;
             Ok(format_doctor_report(&report, resolved_output))
         }
+        Commands::Discover(args) => {
+            let report = sncfr::discover::execute_discover(&profile, &client, &cache, args).await?;
+            Ok(sncfr::discover::format_discover_report(
+                &report,
+                resolved_output,
+            ))
+        }
         Commands::Show(args) => {
             let mut dossiers = Vec::with_capacity(args.tickets.len());
             for ticket_id in &args.tickets {
