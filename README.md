@@ -123,6 +123,8 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 | Dry-run containing such a field | exit `0` | exit `8` (preview still printed) |
 | User or group input with 2+ matches | first row silently picked | exit `2` `AMBIGUOUS_REFERENCE` with candidates |
 | A `create` or catalog order gets `429` | exit `7` | exit `7`, never retried automatically; reads retry per `Retry-After` |
+| A dossier section times out (e.g. a slow journal) | whole `show` fails | exit `0`; that section is `timed_out` (`sections`, `degraded`) |
+| `/api/now/batch` missing on the instance | tried on every `show` | remembered for 7 days (`capabilities.json`); concurrent GETs used |
 | A write times out after sending | exit `7` network error | exit `7` `WRITE_OUTCOME_UNKNOWN` (check before retrying) |
 | `list`/`stats`/`feed` `--state`/`--priority` | sent as typed | resolved per table (e.g. `--priority low` → `5` with a pack); unverifiable values sent as typed with an in-band ⚠ |
 | `--group Storage` where only `Storage - L2` exists (pack suffixes) | not found | resolves via suffix, shown as `group:suffix " - L2"` |

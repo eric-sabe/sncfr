@@ -196,6 +196,61 @@ impl BatchResponse {
     }
 }
 
+/// How [`ReadOnlyClient::get_all`] fetched its sub-requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchPath {
+    Batch,
+    /// Batch not tried (capability record).
+    Skipped,
+    /// Batch tried and failed.
+    Fallback(BatchFailure),
+}
+
+/// Why `/api/now/batch` failed, and what that implies for the capability record (CAP-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchFailure {
+    pub http_status: Option<u16>,
+    /// `Some` when the failure is persistent (record it); `None` for transient failures.
+    pub persistent: Option<(crate::capabilities::CapState, crate::capabilities::CapHint)>,
+}
+
+impl BatchFailure {
+    fn classify(err: &SncfrError) -> Self {
+        use crate::capabilities::{CapHint, CapState};
+        match err {
+            SncfrError::NetworkOrInstance {
+                status: Some(400),
+                message,
+                ..
+            } if message
+                .to_ascii_lowercase()
+                .contains("does not represent any resource") =>
+            {
+                Self {
+                    http_status: Some(400),
+                    persistent: Some((CapState::Unavailable, CapHint::UriNotResource)),
+                }
+            }
+            SncfrError::NotFound { .. } => Self {
+                http_status: Some(404),
+                persistent: Some((CapState::Unavailable, CapHint::UriNotResource)),
+            },
+            SncfrError::AclForbidden { .. } => Self {
+                http_status: Some(403),
+                persistent: Some((CapState::Unauthorized, CapHint::Acl)),
+            },
+            SncfrError::NetworkOrInstance { status, .. } => Self {
+                http_status: *status,
+                persistent: None,
+            },
+            _ => Self {
+                http_status: None,
+                persistent: None,
+            },
+        }
+    }
+}
+
 /// Individual sub-response returned inside `serviced_requests` from `/api/now/batch`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServicedSubResponse {
@@ -577,31 +632,81 @@ impl ReadOnlyClient {
         batch_request_id: &str,
         requests: &[BatchGetSubRequest],
     ) -> Result<BatchResponse, SncfrError> {
-        match self.batch_get(batch_request_id, requests).await {
-            Ok(batch) => Ok(batch),
-            Err(SncfrError::AuthExpired { instance }) => Err(SncfrError::AuthExpired { instance }),
-            Err(SncfrError::AuthRequired { profile }) => Err(SncfrError::AuthRequired { profile }),
-            Err(err) => {
-                crate::debug_log!(
-                    "batch",
-                    "/api/now/batch unavailable ({err}); falling back to {} concurrent GET requests",
-                    requests.len()
-                );
-                let futures = requests
-                    .iter()
-                    .map(|sub_req| self.execute_fallback_sub_get(sub_req));
-                let results = futures_util::future::join_all(futures).await;
-                let mut serviced_requests = Vec::with_capacity(results.len());
-                for res in results {
-                    serviced_requests.push(res?);
+        self.get_all(batch_request_id, requests, true)
+            .await
+            .map(|(resp, _)| resp)
+    }
+
+    /// Fetches every sub-request (ADR-0003 amendment): through `/api/now/batch` when `try_batch`
+    /// (the capability record says it may work), otherwise — or when batch fails — as concurrent
+    /// GETs. A failed sub-request becomes a non-2xx sub-response (403/404/408 for a timeout, or
+    /// 500) so each section degrades on its own; only an expired session fails the call.
+    pub async fn get_all(
+        &self,
+        batch_request_id: &str,
+        requests: &[BatchGetSubRequest],
+        try_batch: bool,
+    ) -> Result<(BatchResponse, BatchPath), SncfrError> {
+        let path = if try_batch {
+            match self.batch_get(batch_request_id, requests).await {
+                Ok(batch) => return Ok((batch, BatchPath::Batch)),
+                Err(err @ (SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. })) => {
+                    return Err(err);
                 }
-                Ok(BatchResponse {
-                    batch_request_id: Some(batch_request_id.to_string()),
-                    serviced_requests,
-                    unserviced_requests: Vec::new(),
-                })
+                Err(err) => {
+                    crate::debug_log!(
+                        "batch",
+                        "/api/now/batch unavailable ({err}); falling back to {} concurrent GET requests",
+                        requests.len()
+                    );
+                    BatchPath::Fallback(BatchFailure::classify(&err))
+                }
             }
+        } else {
+            crate::debug_log!(
+                "batch",
+                "batch skipped (capability record); using concurrent GETs"
+            );
+            BatchPath::Skipped
+        };
+        let futures = requests
+            .iter()
+            .map(|sub_req| self.execute_fallback_sub_get(sub_req));
+        let results = futures_util::future::join_all(futures).await;
+        let mut serviced_requests = Vec::with_capacity(results.len());
+        for (sub_req, res) in requests.iter().zip(results) {
+            let sub = match res {
+                Ok(sub) => sub,
+                Err(err @ (SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. })) => {
+                    return Err(err);
+                }
+                Err(err) => ServicedSubResponse {
+                    id: sub_req.id.clone(),
+                    status_code: match &err {
+                        SncfrError::AclForbidden { .. } => 403,
+                        SncfrError::NotFound { .. } => 404,
+                        SncfrError::TimedOut { .. } => 408,
+                        SncfrError::NetworkOrInstance {
+                            status: Some(code), ..
+                        } => *code,
+                        _ => 500,
+                    },
+                    status_text: None,
+                    body: None,
+                    error_message: Some(err.to_string()),
+                    execution_time: None,
+                },
+            };
+            serviced_requests.push(sub);
         }
+        Ok((
+            BatchResponse {
+                batch_request_id: Some(batch_request_id.to_string()),
+                serviced_requests,
+                unserviced_requests: Vec::new(),
+            },
+            path,
+        ))
     }
 
     async fn execute_fallback_sub_get(
@@ -689,6 +794,12 @@ impl ReadOnlyClient {
     }
 
     fn map_reqwest_error(&self, err: reqwest::Error) -> SncfrError {
+        if err.is_timeout() {
+            return SncfrError::TimedOut {
+                resource: err.url().map_or_else(String::new, |u| u.path().to_string()),
+                timeout_secs: self.policy.timeout.as_secs(),
+            };
+        }
         SncfrError::NetworkOrInstance {
             message: format!(
                 "Request to '{}' failed: {err}",
