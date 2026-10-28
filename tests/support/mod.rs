@@ -60,6 +60,9 @@ impl Respond for GroupDirectory {
             .map(|(_, v)| v.into_owned())
             .unwrap_or_default();
         let matches = |name: &str| -> bool {
+            if q.is_empty() {
+                return true;
+            }
             if let Some(list) = q.strip_prefix("nameIN") {
                 return list.split(',').any(|n| n == name);
             }
@@ -101,9 +104,12 @@ pub enum Scenario {
     InUseOotbLow,
     /// `/api/now/stats/*` answers 403.
     StatsUnauthorized,
+    /// `task` answers with recent rows (`number`, `sys_class_name`): three `ABC-` rows on
+    /// `u_abc_request`, two `INC` rows (`task_sample.json`).
+    TaskSample,
 }
 
-/// `/api/now/stats/<table>?sysparm_group_by=<field>` against one `in_use.json` set.
+/// `/api/now/stats/<table>?sysparm_group_by=<field>` against one `in_use.json` set (incident only).
 struct InUseStats(Value);
 
 impl Respond for InUseStats {
@@ -114,7 +120,13 @@ impl Respond for InUseStats {
             .find(|(k, _)| k == "sysparm_group_by")
             .map(|(_, v)| v.into_owned())
             .unwrap_or_default();
-        let rows: Vec<Value> = self.0[field.as_str()]
+        // Only incident has in-use data; any other table (or a count without group-by) is empty.
+        let data = if req.url.path() == "/api/now/stats/incident" {
+            &self.0[field.as_str()]
+        } else {
+            &Value::Null
+        };
+        let rows: Vec<Value> = data
             .as_array()
             .into_iter()
             .flatten()
@@ -281,10 +293,13 @@ impl ExampleCorp {
                     "ootb_low"
                 };
                 Mock::given(method("GET"))
-                    .and(path("/api/now/stats/incident"))
+                    .and(wiremock::matchers::path_regex("^/api/now/stats/"))
                     .respond_with(InUseStats(fixture("in_use.json")[key].clone()))
                     .mount(&self.server)
                     .await;
+            }
+            Scenario::TaskSample => {
+                self.get("task", fixture("task_sample.json")).await;
             }
             Scenario::StatsUnauthorized => {
                 Mock::given(method("GET"))
