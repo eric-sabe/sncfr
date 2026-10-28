@@ -1,0 +1,14 @@
+{
+  "result": [
+    { "name": "incident", "element": "priority", "value": "0", "label": "0 - Emergency", "sequence": "0" },
+    { "name": "incident", "element": "priority", "value": "1", "label": "1 - Critical", "sequence": "1" },
+    { "name": "incident", "element": "priority", "value": "2", "label": "2 - High", "sequence": "2" },
+    { "name": "incident", "element": "priority", "value": "3", "label": "3 - Moderate", "sequence": "3" },
+    { "name": "incident", "element": "priority", "value": "4", "label": "4 - Minor", "sequence": "4" },
+    { "name": "incident", "element": "priority", "value": "5", "label": "5 - Low", "sequence": "5" },
+    { "name": "incident", "element": "state", "value": "2", "label": "In Progress", "sequence": "2" },
+    { "name": "incident", "element": "state", "value": "6", "label": "Resolved", "sequence": "6" },
+    { "name": "sc_req_item", "element": "state", "value": "2", "label": "Work in Progress", "sequence": "2" },
+    { "name": "sc_req_item", "element": "state", "value": "3", "label": "Closed Complete", "sequence": "3" }
+  ]
+}
