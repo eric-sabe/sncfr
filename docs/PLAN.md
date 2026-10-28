@@ -103,4 +103,4 @@ Order: H → P0 → P1 → P2 → P2.5 → P5 → P9/P9.5 → P10. P3 → P4 →
 
 **Hotfix 0.1.6 (approved):** `approvals approve|reject <ticket>` currently acts on the first pending approval on the ticket, whoever the approver is (`src/workflows.rs:162-185`). APR-4 restricts the target to the caller's own pending approval. No release tags exist yet, so H.1 also tags `v0.1.5` at `51d640e`.
 
-GitHub milestones and issues will be linked here once they are created.
+**Tracking:** 48 issues, [#20](https://github.com/eric-sabe/sncfr/issues/20)–[#67](https://github.com/eric-sabe/sncfr/issues/67), on [Project #40](https://github.com/users/eric-sabe/projects/40). Milestones: [Hotfix 0.1.6](https://github.com/eric-sabe/sncfr/milestone/6) ([#20](https://github.com/eric-sabe/sncfr/issues/20)) · [M6](https://github.com/eric-sabe/sncfr/milestone/7) · [M7](https://github.com/eric-sabe/sncfr/milestone/8) · [M8](https://github.com/eric-sabe/sncfr/milestone/9) · [M9](https://github.com/eric-sabe/sncfr/milestone/10) · [M10](https://github.com/eric-sabe/sncfr/milestone/11). The spec's item table links each item to its issue.
