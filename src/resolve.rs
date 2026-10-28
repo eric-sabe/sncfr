@@ -290,7 +290,12 @@ async fn query_ticket_in_table(
                 record: first,
             }))
         }
-        Err(SncfrError::AclForbidden { .. } | SncfrError::NotFound { .. }) => Ok(None),
+        // ID-4: a forbidden table is not a missing ticket.
+        Err(SncfrError::AclForbidden { details, .. }) => Err(SncfrError::AclForbidden {
+            resource: table.to_string(),
+            details,
+        }),
+        Err(SncfrError::NotFound { .. }) => Ok(None),
         Err(err) => Err(err),
     }
 }
@@ -309,7 +314,13 @@ async fn query_ticket_via_task_fallback(
 
     let resp: Value = match client.get_json("/api/now/table/task", &query).await {
         Ok(r) => r,
-        Err(SncfrError::AclForbidden { .. } | SncfrError::NotFound { .. }) => return Ok(None),
+        Err(SncfrError::AclForbidden { details, .. }) => {
+            return Err(SncfrError::AclForbidden {
+                resource: "task".to_string(),
+                details,
+            });
+        }
+        Err(SncfrError::NotFound { .. }) => return Ok(None),
         Err(err) => return Err(err),
     };
 
@@ -535,5 +546,34 @@ mod tests {
             synced.prefixes.get("INC").map(String::as_str),
             Some("incident")
         );
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_table_for_a_known_prefix_is_exit_4_naming_it() {
+        // CT-34 (ID-4)
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/incident"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(json!({ "error": { "message": "denied" } })),
+            )
+            .mount(&server)
+            .await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        let err = resolve_ticket(&client, &cache, "INC0012345")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().exit_code(), 4, "{err}");
+        assert!(err.to_string().contains("'incident'"), "{err}");
     }
 }
