@@ -1,5 +1,5 @@
 use crate::auth::resolve_current_identity;
-use crate::cache::InstanceCache;
+use crate::cache::{CachedIdentity, InstanceCache};
 use crate::cli::{ApprovalActionArgs, ApprovalListArgs, CatalogOrderArgs};
 use crate::client::{
     ReadOnlyClient, WritePermit, extract_field_display, extract_field_pair, extract_field_value,
@@ -27,6 +27,48 @@ pub struct ApprovalItem {
     pub updated_on: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments: Option<String>,
+    /// Raw `state` value (e.g. `requested`), used to select approve/reject targets.
+    #[serde(skip)]
+    pub state_value: Option<String>,
+    /// Raw `approver` sys_id, used to select approve/reject targets.
+    #[serde(skip)]
+    pub approver_sys_id: Option<String>,
+    /// Display value of the approval `group`, when the approval is group-linked.
+    #[serde(skip)]
+    pub group: Option<String>,
+    /// `group.assignment_group` sys_id, used to match group-linked approvals against `@my-groups`.
+    #[serde(skip)]
+    pub group_assignment_group: Option<String>,
+}
+
+impl ApprovalItem {
+    fn is_requested(&self) -> bool {
+        self.state_value
+            .as_deref()
+            .unwrap_or(&self.state)
+            .eq_ignore_ascii_case("requested")
+    }
+
+    /// True when this approval is assigned to `identity` directly or through one of its groups (APR-4).
+    fn is_linked_to(&self, identity: &CachedIdentity) -> bool {
+        self.approver_sys_id.as_deref() == Some(identity.sys_id.as_str())
+            || self
+                .group_assignment_group
+                .as_deref()
+                .is_some_and(|ag| identity.groups.iter().any(|g| g.sys_id == ag))
+    }
+
+    fn describe(&self) -> String {
+        let via = self
+            .group
+            .as_deref()
+            .map(|g| format!(" via group {g}"))
+            .unwrap_or_default();
+        format!(
+            "{} — {}{via} [{}] on {}",
+            self.sys_id, self.approver, self.state, self.target_ticket
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +178,7 @@ pub async fn execute_approvals_show(
                 ("sysparm_display_value", "all"),
                 (
                     "sysparm_fields",
-                    "sys_id,state,approver,sysapproval,document_id,source_table,comments,sys_created_on,sys_updated_on",
+                    "sys_id,state,approver,group,group.assignment_group,sysapproval,document_id,source_table,comments,sys_created_on,sys_updated_on",
                 ),
                 ("sysparm_limit", "25"),
             ],
@@ -167,23 +209,8 @@ pub async fn execute_approval_action(
     permit: Option<WritePermit>,
 ) -> Result<MutationReport, SncfrError> {
     let show_env = execute_approvals_show(&client, cache, &args.approval_or_ticket).await?;
-    let identity_sys_id = resolve_current_identity(&client, cache, false)
-        .await
-        .ok()
-        .map(|i| i.sys_id);
-
-    // Prefer a pending approval record assigned to `@me` if multiple approvals exist on a ticket
-    let target = show_env
-        .items
-        .iter()
-        .find(|a| a.state.eq_ignore_ascii_case("requested"))
-        .or_else(|| show_env.items.first())
-        .ok_or_else(|| SncfrError::NotFound {
-            identifier: args.approval_or_ticket.clone(),
-            table: Some("sysapproval_approver".to_string()),
-        })?
-        .clone();
-    let _ = identity_sys_id;
+    let identity = resolve_current_identity(&client, cache, false).await?;
+    let target = select_approval_target(&args.approval_or_ticket, &show_env.items, &identity)?;
 
     let new_state_val = if approve { "approved" } else { "rejected" };
     let new_state_disp = if approve { "Approved" } else { "Rejected" };
@@ -264,6 +291,48 @@ pub async fn execute_approval_action(
     }
 }
 
+/// Selects the single approval `approvals approve|reject` may act on (APR-4).
+///
+/// Only approvals in state `requested` that are assigned to the current user, directly or via
+/// one of their assignment groups, are candidates. When the input is itself an approval sys_id,
+/// only that record is considered. Never falls back to another approver's record or a
+/// non-pending one: zero candidates is NOT_FOUND (exit 5) and several are ambiguous (exit 2).
+fn select_approval_target(
+    approval_or_ticket: &str,
+    items: &[ApprovalItem],
+    identity: &CachedIdentity,
+) -> Result<ApprovalItem, SncfrError> {
+    let input = approval_or_ticket.trim();
+    let scoped: Vec<&ApprovalItem> = match items.iter().find(|a| a.sys_id == input) {
+        Some(direct) => vec![direct],
+        None => items.iter().collect(),
+    };
+    let candidates: Vec<&ApprovalItem> = scoped
+        .iter()
+        .copied()
+        .filter(|a| a.is_requested() && a.is_linked_to(identity))
+        .collect();
+
+    match candidates.as_slice() {
+        [only] => Ok((*only).clone()),
+        [] => Err(SncfrError::NoActionableApproval {
+            identifier: input.to_string(),
+            found: scoped.iter().map(|a| a.describe()).collect(),
+        }),
+        many => Err(SncfrError::Validation {
+            message: format!(
+                "'{input}' has {} pending approvals assigned to you; choose one by its approval sys_id",
+                many.len()
+            ),
+            valid_choices: many.iter().map(|a| a.describe()).collect(),
+            remediation: Some(
+                "Re-run with the approval sys_id, e.g. `sncfr approvals approve <approval_sys_id>`."
+                    .to_string(),
+            ),
+        }),
+    }
+}
+
 fn parse_approval_rows(resp: &Value) -> Vec<ApprovalItem> {
     let mut items = Vec::new();
     if let Some(rows) = resp.get("result").and_then(Value::as_array) {
@@ -284,6 +353,10 @@ fn parse_approval_rows(resp: &Value) -> Vec<ApprovalItem> {
                 created_on: extract_field_display(row, "sys_created_on").unwrap_or_default(),
                 updated_on: extract_field_display(row, "sys_updated_on").unwrap_or_default(),
                 comments: extract_field_display(row, "comments"),
+                state_value: extract_field_value(row, "state"),
+                approver_sys_id: extract_field_value(row, "approver"),
+                group: extract_field_display(row, "group"),
+                group_assignment_group: extract_field_value(row, "group.assignment_group"),
             });
         }
     }
@@ -680,6 +753,7 @@ pub fn format_catalog_detail(detail: &CatalogItemDetail, format: ResolvedOutputF
 mod tests {
     use super::*;
     use crate::client::ClientAuth;
+    use clap::Parser;
     use tempfile::tempdir;
     use url::Url;
     use wiremock::matchers::{method, path};
@@ -784,6 +858,236 @@ mod tests {
             Some(
                 "sncfr catalog order fedcba9876543210fedcba9876543210 --var aws_region=us-east-1 --write"
             )
+        );
+    }
+
+    const TICKET_SYS_ID: &str = "c0ffee00c0ffee00c0ffee00c0ffee00";
+    const ME: &str = "11111111111111111111111111111111";
+    const OTHER: &str = "22222222222222222222222222222222";
+    const MY_GROUP: &str = "33333333333333333333333333333333";
+
+    fn approval_row(
+        sys_id: &str,
+        state: &str,
+        approver: (&str, &str),
+        group: Option<(&str, &str)>,
+    ) -> Value {
+        let mut row = json!({
+            "sys_id": { "value": sys_id, "display_value": sys_id },
+            "state": { "value": state, "display_value": state[..1].to_uppercase() + &state[1..] },
+            "approver": { "value": approver.0, "display_value": approver.1 },
+            "sysapproval": { "value": TICKET_SYS_ID, "display_value": "CHG0031002" },
+            "sys_created_on": { "value": "2026-10-22 10:00:00", "display_value": "2026-10-22 10:00:00" },
+            "sys_updated_on": { "value": "2026-10-22 10:00:00", "display_value": "2026-10-22 10:00:00" }
+        });
+        if let Some((name, assignment_group)) = group {
+            row["group"] = json!({ "value": "ag1", "display_value": name });
+            row["group.assignment_group"] =
+                json!({ "value": assignment_group, "display_value": name });
+        }
+        row
+    }
+
+    /// Mounts the approvals for one ticket plus a PATCH endpoint that must never be called,
+    /// and returns a client whose identity cache holds `ME` in `MY_GROUP`.
+    async fn approval_fixture(
+        server: &MockServer,
+        rows: Vec<Value>,
+    ) -> (ReadOnlyClient, tempfile::TempDir, InstanceCache) {
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sysapproval_approver"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
+            .mount(server)
+            .await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {} })))
+            .expect(0)
+            .mount(server)
+            .await;
+
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        cache
+            .write_identity(&CachedIdentity {
+                sys_id: ME.to_string(),
+                user_name: "pat.example".to_string(),
+                display_name: "Pat Example".to_string(),
+                email: None,
+                groups: vec![crate::cache::CachedGroup {
+                    sys_id: MY_GROUP.to_string(),
+                    name: "Network - L2".to_string(),
+                }],
+            })
+            .expect("write identity");
+        (client, dir, cache)
+    }
+
+    fn approve_args(target: &str, write: bool) -> (ApprovalActionArgs, Option<WritePermit>) {
+        let args = ApprovalActionArgs {
+            approval_or_ticket: target.to_string(),
+            comments: None,
+            write,
+        };
+        let permit = write.then(|| {
+            let cli = crate::cli::Cli::try_parse_from([
+                "sncfr",
+                "approvals",
+                "approve",
+                target,
+                "--write",
+            ])
+            .expect("parse");
+            WritePermit::issue(&cli, None)
+                .expect("no lock")
+                .expect("write permit issued")
+        });
+        (args, permit)
+    }
+
+    #[tokio::test]
+    async fn approve_never_targets_another_users_or_non_pending_approval() {
+        // CT-60: my approval is already rejected; the only pending one belongs to someone else.
+        let server = MockServer::start().await;
+        let rows = vec![
+            approval_row(
+                "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                "rejected",
+                (ME, "Pat Example"),
+                None,
+            ),
+            approval_row(
+                "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+                "requested",
+                (OTHER, "Sam Sample"),
+                None,
+            ),
+        ];
+        let (client, _dir, cache) = approval_fixture(&server, rows).await;
+
+        let (args, permit) = approve_args(TICKET_SYS_ID, true);
+        let err = execute_approval_action(client, &cache, &args, true, permit)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().exit_code(), 5);
+        let message = err.to_string();
+        assert!(
+            message.contains("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"),
+            "{message}"
+        );
+        assert!(
+            message.contains("a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_with_several_of_my_pending_approvals_is_ambiguous() {
+        // CT-61: two pending approvals are mine, one directly and one through my group.
+        let server = MockServer::start().await;
+        let rows = vec![
+            approval_row(
+                "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+                "requested",
+                (ME, "Pat Example"),
+                None,
+            ),
+            approval_row(
+                "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+                "requested",
+                (OTHER, "Sam Sample"),
+                Some(("Network - L2", MY_GROUP)),
+            ),
+        ];
+        let (client, _dir, cache) = approval_fixture(&server, rows).await;
+
+        let (args, permit) = approve_args(TICKET_SYS_ID, true);
+        let err = execute_approval_action(client, &cache, &args, true, permit)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().exit_code(), 2);
+        let SncfrError::Validation { valid_choices, .. } = &err else {
+            panic!("expected validation error, got {err:?}");
+        };
+        assert_eq!(valid_choices.len(), 2);
+        assert!(
+            valid_choices
+                .iter()
+                .any(|c| c.contains("via group Network - L2"))
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_targets_my_single_group_linked_pending_approval() {
+        let server = MockServer::start().await;
+        let rows = vec![
+            approval_row(
+                "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+                "requested",
+                (OTHER, "Sam Sample"),
+                None,
+            ),
+            approval_row(
+                "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6",
+                "requested",
+                (OTHER, "Sam Sample"),
+                Some(("Network - L2", MY_GROUP)),
+            ),
+        ];
+        let (client, _dir, cache) = approval_fixture(&server, rows).await;
+
+        let (args, _) = approve_args(TICKET_SYS_ID, false);
+        let report = execute_approval_action(client, &cache, &args, true, None)
+            .await
+            .expect("dry-run");
+        assert_eq!(report.mode, "dry_run");
+        assert_eq!(
+            report.sys_id.as_deref(),
+            Some("a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6")
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_by_approval_sys_id_still_requires_my_pending_approval() {
+        let server = MockServer::start().await;
+        let rows = vec![
+            approval_row(
+                "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+                "requested",
+                (OTHER, "Sam Sample"),
+                None,
+            ),
+            approval_row(
+                "a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8",
+                "requested",
+                (ME, "Pat Example"),
+                None,
+            ),
+        ];
+        let (client, _dir, cache) = approval_fixture(&server, rows).await;
+
+        // Another user's approval named directly is refused even though one of mine exists.
+        let (args, _) = approve_args("a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7", false);
+        let err = execute_approval_action(client.clone(), &cache, &args, true, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().exit_code(), 5);
+
+        // Naming my own approval selects exactly that record.
+        let (args, _) = approve_args("a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8", false);
+        let report = execute_approval_action(client, &cache, &args, false, None)
+            .await
+            .expect("dry-run");
+        assert_eq!(
+            report.sys_id.as_deref(),
+            Some("a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8")
         );
     }
 }

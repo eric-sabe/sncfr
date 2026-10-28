@@ -1,6 +1,6 @@
 # `sncfr` Technical & Product Specification
 
-- **Status**: Living Specification (v0.1.0)
+- **Status**: Living Specification (v0.1.6)
 - **Last Updated**: 2026-10-22
 - **Target Persona**: Non-admin ServiceNow users (both ticket-monitors/explorers and ITIL fulfillers/handlers) and AI coding/operations agents acting on their behalf.
 
@@ -157,6 +157,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 
 - **`sncfr auth <login|status|import|logout|profiles>`** — Manage authentication and instance profiles.
 - **`sncfr approvals <list|show|approve|reject>`** — Inspect pending approvals (`sysapproval_approver`) for `@me` and approve/reject (requires `--write`).
+  - `approve`/`reject` act only on an approval in state `requested` whose `approver` is `@me` or whose `group.assignment_group` is one of `@my-groups`. Given a ticket, exactly one such approval must exist: none → exit `5` listing the approvals found, more than one → exit `2` listing candidates (re-run with the approval `sys_id`). A directly given approval `sys_id` must meet the same rule. Another approver's record or a non-pending record is never a write target.
 - **`sncfr catalog <search|show|order>`** — Browse Service Catalog items (`/api/sn_sc/servicecatalog/items`), inspect variables, and submit catalog requests (requires `--write`).
 - **`sncfr schema <table|prefix> [--choices [field]] [--sync]`** — Inspect table fields, mandatory status, and valid `sys_choice` options; manage local metadata cache.
 - **`sncfr table <table_name> [list-flags]`** — Read-only escape hatch for querying arbitrary non-ticket tables (`sys_user`, `sys_user_group`, `cmdb_ci`, `kb_knowledge`, etc.) that the user has ACL permission to read.

@@ -83,6 +83,15 @@ pub enum SncfrError {
         table: Option<String>,
     },
 
+    #[error(
+        "No pending approval on '{identifier}' is assigned to you or your groups (found: {})",
+        .found.join("; ")
+    )]
+    NoActionableApproval {
+        identifier: String,
+        found: Vec<String>,
+    },
+
     #[error("Mutation blocked: profile or environment is locked to read-only mode ({reason})")]
     ReadOnlyLocked { reason: String },
 
@@ -120,7 +129,7 @@ impl SncfrError {
             Self::AuthExpired { .. } => ErrorCode::AuthExpired,
             Self::AuthRequired { .. } => ErrorCode::AuthRequired,
             Self::AclForbidden { .. } => ErrorCode::AclForbidden,
-            Self::NotFound { .. } => ErrorCode::NotFound,
+            Self::NotFound { .. } | Self::NoActionableApproval { .. } => ErrorCode::NotFound,
             Self::ReadOnlyLocked { .. } => ErrorCode::ReadOnlyLocked,
             Self::NetworkOrInstance { .. } => ErrorCode::NetworkOrInstanceError,
         }
@@ -145,6 +154,9 @@ impl SncfrError {
             )),
             Self::NotFound { identifier, .. } => Some(format!(
                 "Verify the ticket number or sys_id '{identifier}' exists and is visible to your account."
+            )),
+            Self::NoActionableApproval { identifier, .. } => Some(format!(
+                "Only approvals in state Requested whose approver is you, or whose group is one of your assignment groups, can be approved or rejected. Run `sncfr approvals show {identifier}` to inspect them."
             )),
             Self::ReadOnlyLocked { .. } => Some(
                 "Unset `SNCFR_READ_ONLY` and set `read_only = false` in config.toml if mutations are intended."
