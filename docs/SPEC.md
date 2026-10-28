@@ -145,6 +145,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
     - `--from-url <servicenow-ui-url>` (parses `sysparm_query` and table name directly from a pasted ServiceNow browser URL, including `/now/nav/ui/classic/params/target/...` URLs)
     - `--query <encoded_query>` (raw ServiceNow encoded query escape hatch)
     - `--limit <n>`, `--offset <n>`, `--sort <field>` / `--asc` / `--desc`
+    - `--with-count`: also return `total` (asks the instance to count, which can be slow on huge tables; `stats` is the cheaper count path). Without it, the envelope's `has_more` is inferred from `count == limit` (PERF-2).
 - **`sncfr search <TEXT> [flags]`**
   - Searches across tickets using ServiceNow full-text index (`123TEXTQUERY321=<TEXT>`) and/or `short_descriptionLIKE<TEXT>^ORdescriptionLIKE<TEXT>`, combinable with all `list` filter flags.
 - **`sncfr feed [@<saved-view>] [flags]`**
