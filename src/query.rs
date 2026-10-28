@@ -18,6 +18,8 @@ pub const DYNAMIC_MY_GROUPS_SYS_ID: &str = "d6435e965f510100a9ad2572f2b47744";
 pub struct EncodedQuery {
     clauses: Vec<String>,
     orders: Vec<String>,
+    /// First value that would have changed the query's structure (NA-13); see [`Self::validate`].
+    rejected: Option<(String, String)>,
 }
 
 impl EncodedQuery {
@@ -32,30 +34,35 @@ impl EncodedQuery {
 
     /// Adds an exact match condition (`field=value`).
     pub fn equals(&mut self, field: &str, value: &str) -> &mut Self {
+        self.guard(value, false);
         self.clauses.push(format!("{field}={value}"));
         self
     }
 
     /// Adds an inequality condition (`field!=value`).
     pub fn not_equals(&mut self, field: &str, value: &str) -> &mut Self {
+        self.guard(value, false);
         self.clauses.push(format!("{field}!={value}"));
         self
     }
 
     /// Adds a substring containment condition (`fieldLIKEvalue`).
     pub fn like(&mut self, field: &str, value: &str) -> &mut Self {
+        self.guard(value, false);
         self.clauses.push(format!("{field}LIKE{value}"));
         self
     }
 
     /// Adds a prefix match condition (`fieldSTARTSWITHvalue`).
     pub fn starts_with(&mut self, field: &str, value: &str) -> &mut Self {
+        self.guard(value, false);
         self.clauses.push(format!("{field}STARTSWITH{value}"));
         self
     }
 
     /// Adds a suffix match condition (`fieldENDSWITHvalue`).
     pub fn ends_with(&mut self, field: &str, value: &str) -> &mut Self {
+        self.guard(value, false);
         self.clauses.push(format!("{field}ENDSWITH{value}"));
         self
     }
@@ -71,6 +78,9 @@ impl EncodedQuery {
             .map(|v| v.as_ref().trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        for v in &joined {
+            self.guard(v, true);
+        }
         if !joined.is_empty() {
             self.clauses.push(format!("{field}IN{}", joined.join(",")));
         }
@@ -91,12 +101,14 @@ impl EncodedQuery {
 
     /// Adds a greater-than-or-equal condition (`field>=value`).
     pub fn gte(&mut self, field: &str, value: &str) -> &mut Self {
+        self.guard(value, false);
         self.clauses.push(format!("{field}>={value}"));
         self
     }
 
     /// Adds a less-than-or-equal condition (`field<=value`).
     pub fn lte(&mut self, field: &str, value: &str) -> &mut Self {
+        self.guard(value, false);
         self.clauses.push(format!("{field}<={value}"));
         self
     }
@@ -109,6 +121,7 @@ impl EncodedQuery {
 
     /// Adds a full-text search index condition (`123TEXTQUERY321=<phrase>`).
     pub fn text_query(&mut self, phrase: &str) -> &mut Self {
+        self.guard(phrase, false);
         self.clauses.push(format!("123TEXTQUERY321={phrase}"));
         self
     }
@@ -139,17 +152,46 @@ impl EncodedQuery {
 
     /// Appends an ascending sort (`ORDERBY<field>`).
     pub fn order_by(&mut self, field: &str) -> &mut Self {
+        self.guard(field, false);
         self.orders.push(format!("ORDERBY{field}"));
         self
     }
 
     /// Appends a descending sort (`ORDERBYDESC<field>`).
     pub fn order_by_desc(&mut self, field: &str) -> &mut Self {
+        self.guard(field, false);
         self.orders.push(format!("ORDERBYDESC{field}"));
         self
     }
 
     /// Renders the complete `sysparm_query` string.
+    fn guard(&mut self, value: &str, in_list: bool) {
+        if self.rejected.is_some() {
+            return;
+        }
+        let checked = if in_list {
+            crate::untrusted::query_list_value(value)
+        } else {
+            crate::untrusted::query_value(value)
+        };
+        if let Err(SncfrError::InvalidQueryValue { value, reason }) = checked {
+            self.rejected = Some((value, reason));
+        }
+    }
+
+    /// Fails if any interpolated value would have added, removed, or reordered query terms
+    /// (`^`, line breaks, `javascript:`, or `,` inside an `IN` list). Raw fragments added with
+    /// [`Self::raw`] (`--query`, saved views, `--from-url`) are the caller's own and not checked.
+    pub fn validate(&self) -> Result<(), SncfrError> {
+        match &self.rejected {
+            Some((value, reason)) => Err(SncfrError::InvalidQueryValue {
+                value: value.clone(),
+                reason: reason.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     pub fn build(&self) -> String {
         let mut parts = Vec::with_capacity(self.clauses.len() + self.orders.len());
         parts.extend(self.clauses.iter().cloned());
@@ -607,6 +649,7 @@ pub fn compile_list_filters(
         eq.order_by_desc("sys_updated_on");
     }
 
+    eq.validate()?;
     Ok((table, eq))
 }
 
@@ -620,6 +663,27 @@ mod tests {
     use super::*;
     use crate::cache::CachedGroup;
     use chrono::TimeZone;
+
+    #[test]
+    fn rejects_values_that_would_change_the_query_structure() {
+        // CT-66 (unit half): a group name cannot smuggle in an OR clause.
+        let mut eq = EncodedQuery::new();
+        eq.equals("assignment_group.name", "Nope^ORname=Storage - L2");
+        assert_eq!(
+            eq.validate().unwrap_err().code().as_str(),
+            "INVALID_QUERY_VALUE"
+        );
+        let mut eq = EncodedQuery::new();
+        eq.in_list("state", ["1", "2,3"]);
+        assert!(eq.validate().is_err());
+        let mut eq = EncodedQuery::new();
+        eq.raw("active=true^priority=1")
+            .equals("assignment_group.name", "Ops, EMEA - L2");
+        assert!(
+            eq.validate().is_ok(),
+            "raw fragments and commas outside IN are fine"
+        );
+    }
 
     #[test]
     fn builds_complex_encoded_queries_cleanly() {

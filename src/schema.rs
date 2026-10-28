@@ -19,6 +19,17 @@ pub async fn load_or_sync_table_schema(
     let prefixes = load_or_sync_prefixes(client, cache, force_sync).await?;
     let table = resolve_table_name(table_or_prefix, &prefixes);
 
+    if !crate::untrusted::is_table_name(&table) {
+        return Err(SncfrError::InvalidArgs {
+            message: format!(
+                "'{}' is not a valid table name",
+                crate::untrusted::inline(&table)
+            ),
+            remediation: Some(
+                "Table names contain only lowercase letters, digits, and `_`.".to_string(),
+            ),
+        });
+    }
     if !force_sync && let Ok(Some(cached)) = cache.read_table_schema(&table) {
         return Ok(cached);
     }

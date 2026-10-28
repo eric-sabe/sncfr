@@ -186,7 +186,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 | Exit Code | Error Code | Meaning & Agent Remediation |
 | :--- | :--- | :--- |
 | `0` | `OK` / `DRY_RUN_OK` | Command succeeded (or dry-run validated cleanly). |
-| `2` | `INVALID_ARGS` / `VALIDATION_ERROR` | CLI flag error, invalid choice value, or unresolved user/group reference (includes valid choices in error output). |
+| `2` | `INVALID_ARGS` / `VALIDATION_ERROR` / `INVALID_QUERY_VALUE` / `PACK_INVALID` | CLI flag error, invalid choice value, or unresolved user/group reference (includes valid choices in error output). `INVALID_QUERY_VALUE`: a value would add, remove, or reorder encoded-query terms (`^`, line breaks, `javascript:`, or `,` inside an `IN` list); request paths are also restricted to plain table names on the instance origin. `PACK_INVALID`: an Instance Pack failed to parse or validate (§7.3). |
 | `3` | `AUTH_EXPIRED` / `AUTH_REQUIRED` | Session missing or expired. Remediation: run `sncfr auth login`. |
 | `4` | `ACL_FORBIDDEN` | Authenticated user lacks ServiceNow permissions for the target resource. |
 | `5` | `NOT_FOUND` | Ticket number or record `sys_id` does not exist (or is hidden by query business rules/ACLs). |

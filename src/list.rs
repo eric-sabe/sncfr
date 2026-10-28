@@ -119,6 +119,7 @@ async fn execute_filtered_query(
     if let Some(text) = search_text {
         eq.text_query(text);
     }
+    eq.validate()?;
 
     // Default sort by `sys_updated_on` descending when no sort order was specified
     let mut query_str = eq.build();

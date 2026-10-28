@@ -116,6 +116,8 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 
 | Situation | 0.1.x | 0.2.0 |
 |---|---|---|
+| A filter or lookup value contains `^`, a line break, or `javascript:` (e.g. `--group "x^ORname=y"`) | interpolated into the query | exit `2` `INVALID_QUERY_VALUE`, nothing sent (`--query` is still sent as written) |
+| Untrusted text in a dry-run preview | printed as-is | control characters and terminal escapes removed; Markdown cells escaped |
 
 ---
 

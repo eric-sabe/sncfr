@@ -17,3 +17,25 @@ async fn harness_runs_against_a_locked_down_instance_with_the_example_pack() {
     assert_eq!(listed.json()["records"][0]["number"], "INC0012345");
     assert!(corp.mutating_requests().await.is_empty());
 }
+
+#[tokio::test]
+async fn a_group_name_cannot_smuggle_an_or_clause_into_the_lookup() {
+    // CT-66 (NA-13)
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--group",
+        "Nope^ORname=Storage - L2",
+        "--write",
+    ]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(out.stderr.contains("INVALID_QUERY_VALUE"), "{}", out.stderr);
+    assert!(
+        corp.queries_to("/api/now/table/sys_user_group")
+            .await
+            .is_empty()
+    );
+    assert!(corp.mutating_requests().await.is_empty());
+}
