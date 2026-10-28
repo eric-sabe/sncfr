@@ -192,6 +192,10 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 
 ## 6. Output Contracts & Error Handling
 
+### 6.0 Table API Read Defaults (PERF-1, PERF-4)
+
+Every Table API read (direct and inside batch sub-requests) sends `sysparm_no_count=true` (counting very large tables times out) and `sysparm_exclude_reference_link=true`, unless the caller sets them explicitly. `list --with-count` asks for a total, and field-type inference keeps reference links.
+
 ### 6.1 Output Modes (`--output` / `-o`)
 
 | Mode | When Default | Behavior |
