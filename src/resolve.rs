@@ -11,16 +11,19 @@ pub fn builtin_prefixes() -> BTreeMap<String, String> {
     crate::pack::active().prefix_map()
 }
 
-/// Splits a ticket number like `"inc0010042"` into `Some(("INC", "INC0010042"))`.
+/// Splits a ticket number like `"inc0010042"` into `Some(("INC", "INC0010042"))`. One `-` between
+/// the prefix and the digits is accepted (`"abc-1234567"` → `("ABC", "ABC-1234567")`); the number
+/// keeps its separator when it is sent to `number=` (ID-2).
 pub fn split_ticket_prefix(raw: &str) -> Option<(String, String)> {
     let trimmed = raw.trim();
     let first_digit_idx = trimmed.find(|c: char| c.is_ascii_digit())?;
     if first_digit_idx == 0 {
         return None;
     }
-    let prefix = &trimmed[..first_digit_idx];
+    let head = &trimmed[..first_digit_idx];
     let rest = &trimmed[first_digit_idx..];
-    if !prefix.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
+    let prefix = head.strip_suffix('-').unwrap_or(head);
+    if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
         return None;
     }
     if !rest.chars().any(|c| c.is_ascii_digit()) {
@@ -375,6 +378,18 @@ mod tests {
             Some(("U_SEC".to_string(), "U_SEC009911".to_string()))
         );
         assert_eq!(split_ticket_prefix("12345"), None);
+    }
+
+    #[test]
+    fn accepts_one_hyphen_between_prefix_and_digits() {
+        // ID-2
+        assert_eq!(
+            split_ticket_prefix("abc-1234567"),
+            Some(("ABC".to_string(), "ABC-1234567".to_string()))
+        );
+        assert_eq!(split_ticket_prefix("ABC--1234567"), None);
+        assert_eq!(split_ticket_prefix("-1234567"), None);
+        assert_eq!(split_ticket_prefix("A-B-1234567"), None);
     }
 
     #[tokio::test]
