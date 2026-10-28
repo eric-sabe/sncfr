@@ -77,6 +77,9 @@ pub struct ProfileConfig {
     /// Forbid `--pack` / `SNCFR_PACK` overrides on this profile.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pack_locked: bool,
+    /// Per-request timeout in seconds (1-300); `--timeout` / `SNCFR_TIMEOUT` override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Top-level `config.toml` representation (`docs/SPEC.md` Section 7.1).
@@ -111,6 +114,8 @@ pub struct ResolvedProfile {
     pub pack_path: Option<PathBuf>,
     /// Whether `--pack` / `SNCFR_PACK` overrides are forbidden on this profile.
     pub pack_locked: bool,
+    /// Profile `timeout_secs`, if set.
+    pub timeout_secs: Option<u64>,
 }
 
 impl ResolvedProfile {
@@ -373,6 +378,7 @@ impl AppConfig {
                         .map(resolve_pack_path)
                         .transpose()?,
                     pack_locked: profile_cfg.pack_locked,
+                    timeout_secs: profile_cfg.timeout_secs,
                 });
             } else if cli.profile.is_some() && cli.instance.is_none() {
                 let available: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
@@ -406,6 +412,7 @@ impl AppConfig {
                 views: BTreeMap::new(),
                 pack_path: None,
                 pack_locked: false,
+                timeout_secs: None,
             });
         }
 

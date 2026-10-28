@@ -108,6 +108,7 @@ All subcommands accept the following global flags:
 - `--read-only` (env `SNCFR_READ_ONLY`): Enforce hard read-only lock for the invocation (rejects `--write` with exit code `6`).
 - `--verbose` (`-v`, env `SNCFR_VERBOSE`): Enable verbose timestamped diagnostic logging to `stderr` (covering profile resolution, browser discovery, CDP session probing, Keychain storage, and HTTP request/response status).
 - `--log-file <path>` (env `SNCFR_LOG_FILE`): Append structured timestamped debug logs to `<path>`.
+- `--timeout <secs>` (env `SNCFR_TIMEOUT`, profile `timeout_secs`): Per-request timeout, 1–300 s (default 30); out of range is exit `2`.
 - `--allow-unverified <field,...>`: Send the named `UNVERIFIABLE` fields exactly as typed (§4.2, §6.2). Explicit names only (no `*`/`all`; catalog variables as `var:<name>`), never set by env or profile; only on explicit user instruction.
 - `--pack <path>` (env `SNCFR_PACK`): Instance Pack layered over the profile's `pack =` for this invocation (§7.3). Rejected (exit `2`) on a profile with `pack_locked = true`.
 
@@ -204,7 +205,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 | `4` | `ACL_FORBIDDEN` | Authenticated user lacks ServiceNow permissions for the target resource. |
 | `5` | `NOT_FOUND` | Ticket number or record `sys_id` does not exist (or is hidden by query business rules/ACLs). |
 | `6` | `READ_ONLY_LOCKED` | `--write` was attempted while `SNCFR_READ_ONLY=1` or profile `read_only = true` is active. |
-| `7` | `NETWORK_OR_INSTANCE_ERROR` | TLS, timeout, rate-limit (`429`), or instance `5xx` error. |
+| `7` | `NETWORK_OR_INSTANCE_ERROR` | TLS, timeout, rate-limit (`429`), or instance `5xx` error. **Rate limits (SAFE-9)**: on `429`, `Retry-After` (seconds or HTTP-date) is honored, clamped to 60 s per wait and 120 s per request. Reads retry up to 3 times, a PATCH retries once and only on the instance's own JSON 429, and a POST (`create`, catalog order, attachment) is never retried. The envelope then carries `retry_after_secs`. An optional pack `limits.max_requests_per_minute` rate-limits the process. **`WRITE_OUTCOME_UNKNOWN`** (also exit 7): a write timed out or the connection reset after sending, so it may or may not have landed. Run `sncfr show` before any retry, and never re-run a create or order. |
 | `8` | `UNVERIFIABLE` | One or more values could not be confirmed against an active pack or instance metadata (§4.2). **Nothing was written.** The preview still prints to stdout; the error envelope lists `unverifiable_fields[{field, input, would_send, reason, candidates, suggested}]`. Agents: show the user `would_send` and candidates, prefer re-running with a candidate value, and use `--allow-unverified <fields>` only when the user explicitly confirms the literal value. |
 | `9` | `WRITE_NOT_APPLIED` | The instance accepted the write but returned some fields with a different value than sent (unknown field, field-level write ACL, business rule). The record **was** partly updated; `not_applied[{field, sent, returned}]`. Do not retry; report to the user. Fields absent from the response are listed as `unconfirmed` and do not change the exit code. |
 | `2` | `PACK_NOT_FOR_INSTANCE` | `--write` against an instance the merged Instance Pack does not list in `instances` (reads print a warning). |

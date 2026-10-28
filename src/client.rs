@@ -136,6 +136,8 @@ pub struct ReadOnlyClient {
     base_url: Url,
     http: reqwest::Client,
     auth: ClientAuth,
+    /// Timeout, retry, and rate-limit rules (SAFE-9, PERF-6), shared by clones.
+    policy: std::sync::Arc<crate::policy::RequestPolicy>,
 }
 
 /// A single read-only (`GET`) sub-request inside a `/api/now/batch` request.
@@ -299,7 +301,6 @@ impl ReadOnlyClient {
             .user_agent(concat!("sncfr/", env!("CARGO_PKG_VERSION")))
             .default_headers(default_headers)
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| SncfrError::NetworkOrInstance {
                 message: format!("Failed to initialize HTTP/TLS client: {e}"),
@@ -311,7 +312,76 @@ impl ReadOnlyClient {
             base_url,
             http,
             auth,
+            policy: crate::policy::current(),
         })
+    }
+
+    /// Replaces the request policy (tests use fast retry waits).
+    #[must_use]
+    pub fn with_policy(mut self, policy: crate::policy::RequestPolicy) -> Self {
+        self.policy = std::sync::Arc::new(policy);
+        self
+    }
+
+    /// Sends one request under the policy: per-request timeout, rate limit, and `Retry-After`
+    /// retries per [`crate::policy::RequestKind`]. A write that fails after it may have been sent
+    /// (timeout, reset) is `WRITE_OUTCOME_UNKNOWN` and is never retried (NA-7).
+    async fn send(
+        &self,
+        kind: crate::policy::RequestKind,
+        resource: &str,
+        make: impl Fn() -> Result<reqwest::RequestBuilder, SncfrError>,
+    ) -> Result<reqwest::Response, SncfrError> {
+        let mut attempt: u8 = 0;
+        let mut waited = Duration::ZERO;
+        loop {
+            self.policy.acquire().await;
+            let req = make()?.timeout(self.policy.timeout);
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) if kind.is_write() && !e.is_connect() && !e.is_builder() => {
+                    crate::debug_log!("http", "write to '{resource}' failed after send: {e}");
+                    return Err(SncfrError::WriteOutcomeUnknown {
+                        resource: resource.to_string(),
+                    });
+                }
+                Err(e) => return Err(self.map_reqwest_error(e)),
+            };
+            if resp.status().as_u16() != 429 {
+                return Ok(resp);
+            }
+            let json_body = resp
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.to_ascii_lowercase().contains("json"));
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let wait = self.policy.retry_wait(
+                retry_after.as_deref(),
+                attempt,
+                std::time::SystemTime::now(),
+            );
+            if attempt < kind.retries_on_429(json_body) && waited + wait <= self.policy.retry_budget
+            {
+                crate::debug_log!(
+                    "http",
+                    "429 on '{resource}'; retrying in {}ms",
+                    wait.as_millis()
+                );
+                tokio::time::sleep(wait).await;
+                waited += wait;
+                attempt += 1;
+                continue;
+            }
+            return Err(SncfrError::RateLimited {
+                resource: resource.to_string(),
+                retry_after_secs: wait.as_secs().max(1),
+            });
+        }
     }
 
     /// Returns the base instance [`Url`].
@@ -331,21 +401,38 @@ impl ReadOnlyClient {
         query: &[(&str, &str)],
     ) -> Result<T, SncfrError> {
         let url = self.endpoint_url(path)?;
+        let logged_query: Vec<(&str, &str)> = if path.starts_with("/api/now/table/sys_user") {
+            query
+                .iter()
+                .map(|(k, v)| {
+                    if *k == "sysparm_query" {
+                        (*k, "(redacted)")
+                    } else {
+                        (*k, *v)
+                    }
+                })
+                .collect()
+        } else {
+            query.to_vec()
+        };
         crate::debug_log!(
             "http",
-            "GET {url} query={query:?} auth=[{}]",
+            "GET {url} query={logged_query:?} auth=[{}]",
             self.auth.debug_summary()
         );
         let started = Instant::now();
-        let req = self.auth.apply(self.http.get(url).query(query))?;
-        let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
+        let resp = self
+            .send(crate::policy::RequestKind::Read, path, || {
+                self.auth.apply(self.http.get(url.clone()).query(query))
+            })
+            .await?;
         crate::debug_log!(
             "http",
             "GET {path} -> HTTP {} ({}ms)",
             resp.status(),
             started.elapsed().as_millis()
         );
-        self.decode_json_response(resp, path).await
+        self.decode_json_response(resp, path, true).await
     }
 
     /// Performs an authenticated `GET` request and returns the raw response bytes (e.g., for attachment downloads).
@@ -361,10 +448,16 @@ impl ReadOnlyClient {
             self.auth.debug_summary()
         );
         let started = Instant::now();
-        let req = self
-            .auth
-            .apply(self.http.get(url).header(ACCEPT, "*/*").query(query))?;
-        let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
+        let resp = self
+            .send(crate::policy::RequestKind::Read, path, || {
+                self.auth.apply(
+                    self.http
+                        .get(url.clone())
+                        .header(ACCEPT, "*/*")
+                        .query(query),
+                )
+            })
+            .await?;
         let status = resp.status();
         crate::debug_log!(
             "http",
@@ -372,7 +465,7 @@ impl ReadOnlyClient {
             started.elapsed().as_millis()
         );
         if !status.is_success() {
-            return Err(self.map_error_status(resp, path).await);
+            return Err(self.map_error_status(resp, path, true).await);
         }
         let bytes = resp.bytes().await.map_err(|e| self.map_reqwest_error(e))?;
         Ok(bytes.to_vec())
@@ -387,8 +480,11 @@ impl ReadOnlyClient {
             self.auth.debug_summary()
         );
         let started = Instant::now();
-        let req = self.auth.apply(self.http.head(url).query(query))?;
-        let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
+        let resp = self
+            .send(crate::policy::RequestKind::Read, path, || {
+                self.auth.apply(self.http.head(url.clone()).query(query))
+            })
+            .await?;
         let status = resp.status();
         crate::debug_log!(
             "http",
@@ -436,15 +532,21 @@ impl ReadOnlyClient {
         };
 
         let started = Instant::now();
-        let req = self.auth.apply(self.http.post(url).json(&envelope))?;
-        let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
+        // A batch of GET sub-requests is a read, so it may be retried.
+        let resp = self
+            .send(crate::policy::RequestKind::Read, "/api/now/batch", || {
+                self.auth.apply(self.http.post(url.clone()).json(&envelope))
+            })
+            .await?;
         crate::debug_log!(
             "http",
             "POST /api/now/batch -> HTTP {} ({}ms)",
             resp.status(),
             started.elapsed().as_millis()
         );
-        let raw_val: serde_json::Value = self.decode_json_response(resp, "/api/now/batch").await?;
+        let raw_val: serde_json::Value = self
+            .decode_json_response(resp, "/api/now/batch", true)
+            .await?;
         let target_val = raw_val
             .get("result")
             .filter(|v| v.is_object())
@@ -510,8 +612,11 @@ impl ReadOnlyClient {
         let url = self.endpoint_url(&sanitized)?;
         crate::debug_log!("http", "GET (batch-fallback '{}') {url}", sub_req.id);
         let started = Instant::now();
-        let req = self.auth.apply(self.http.get(url))?;
-        let resp = req.send().await.map_err(|e| self.map_reqwest_error(e))?;
+        let resp = self
+            .send(crate::policy::RequestKind::Read, &sanitized, || {
+                self.auth.apply(self.http.get(url.clone()))
+            })
+            .await?;
         let status = resp.status();
         let code = status.as_u16();
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -597,14 +702,17 @@ impl ReadOnlyClient {
         }
     }
 
+    /// `log_body`: whether an error body may be logged (`false` for writes: their responses can
+    /// echo submitted values).
     async fn decode_json_response<T: DeserializeOwned>(
         &self,
         resp: reqwest::Response,
         resource: &str,
+        log_body: bool,
     ) -> Result<T, SncfrError> {
         let status = resp.status();
         if !status.is_success() {
-            return Err(self.map_error_status(resp, resource).await);
+            return Err(self.map_error_status(resp, resource, log_body).await);
         }
 
         // Guard against SSO/IdP 200 OK HTML login pages when session cookies expire
@@ -628,7 +736,12 @@ impl ReadOnlyClient {
         })
     }
 
-    async fn map_error_status(&self, resp: reqwest::Response, resource: &str) -> SncfrError {
+    async fn map_error_status(
+        &self,
+        resp: reqwest::Response,
+        resource: &str,
+        log_body: bool,
+    ) -> SncfrError {
         let status = resp.status();
         let code = status.as_u16();
         let instance = self.base_url.as_str().trim_end_matches('/').to_string();
@@ -638,7 +751,11 @@ impl ReadOnlyClient {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         let body_text = resp.text().await.unwrap_or_default();
-        let body_preview: String = body_text.chars().take(300).collect();
+        let body_preview: String = if log_body {
+            body_text.chars().take(300).collect()
+        } else {
+            "(write response; not logged)".to_string()
+        };
 
         crate::debug_log!(
             "http",
@@ -718,15 +835,14 @@ impl MutatingClient {
         body: &B,
     ) -> Result<T, SncfrError> {
         let url = self.read_only.endpoint_url(path)?;
-        let req = self
-            .read_only
-            .auth
-            .apply(self.read_only.http.post(url).query(query).json(body))?;
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| self.read_only.map_reqwest_error(e))?;
-        self.read_only.decode_json_response(resp, path).await
+        let ro = &self.read_only;
+        let resp = ro
+            .send(crate::policy::RequestKind::Post, path, || {
+                ro.auth
+                    .apply(ro.http.post(url.clone()).query(query).json(body))
+            })
+            .await?;
+        self.read_only.decode_json_response(resp, path, false).await
     }
 
     /// Sends an authenticated `PATCH` request with a JSON payload (e.g., updating ticket fields, comments, or work notes).
@@ -737,15 +853,14 @@ impl MutatingClient {
         body: &B,
     ) -> Result<T, SncfrError> {
         let url = self.read_only.endpoint_url(path)?;
-        let req = self
-            .read_only
-            .auth
-            .apply(self.read_only.http.patch(url).query(query).json(body))?;
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| self.read_only.map_reqwest_error(e))?;
-        self.read_only.decode_json_response(resp, path).await
+        let ro = &self.read_only;
+        let resp = ro
+            .send(crate::policy::RequestKind::Patch, path, || {
+                ro.auth
+                    .apply(ro.http.patch(url.clone()).query(query).json(body))
+            })
+            .await?;
+        self.read_only.decode_json_response(resp, path, false).await
     }
 
     /// Uploads a binary attachment to a ticket record via `POST /api/now/attachment/file`.
@@ -764,19 +879,19 @@ impl MutatingClient {
             ("table_sys_id", table_sys_id),
             ("file_name", file_name),
         ];
-        let req = self.read_only.auth.apply(
-            self.read_only
-                .http
-                .post(url)
-                .query(&query)
-                .header(CONTENT_TYPE, content_type)
-                .body(bytes),
-        )?;
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| self.read_only.map_reqwest_error(e))?;
-        self.read_only.decode_json_response(resp, path).await
+        let ro = &self.read_only;
+        let resp = ro
+            .send(crate::policy::RequestKind::Post, path, || {
+                ro.auth.apply(
+                    ro.http
+                        .post(url.clone())
+                        .query(&query)
+                        .header(CONTENT_TYPE, content_type)
+                        .body(bytes.clone()),
+                )
+            })
+            .await?;
+        self.read_only.decode_json_response(resp, path, false).await
     }
 }
 
@@ -1142,5 +1257,156 @@ mod tests {
                 .unwrap_or_default()
                 .is_empty()
         );
+    }
+
+    fn policy_client(server: &MockServer, timeout_ms: u64) -> ReadOnlyClient {
+        ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client")
+        .with_policy(crate::policy::RequestPolicy::fast_for_tests(
+            Duration::from_millis(timeout_ms),
+        ))
+    }
+
+    fn write_permit() -> WritePermit {
+        let cli =
+            Cli::try_parse_from(["sncfr", "comment", "INC0010042", "x", "--write"]).expect("parse");
+        WritePermit::issue(&cli, None)
+            .expect("no lock")
+            .expect("permit")
+    }
+
+    async fn count(server: &MockServer, m: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == m)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn reads_retry_after_a_429_with_retry_after() {
+        // CT-24
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/incident"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/incident"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "result": [] })),
+            )
+            .mount(&server)
+            .await;
+        let v: serde_json::Value = policy_client(&server, 1000)
+            .get_json("/api/now/table/incident", &[])
+            .await
+            .expect("retried");
+        assert_eq!(v["result"], serde_json::json!([]));
+        assert_eq!(count(&server, "GET").await, 2);
+    }
+
+    #[tokio::test]
+    async fn huge_retry_after_is_clamped_and_ends_in_rate_limited() {
+        // CT-25 (integration half; the clamp itself is unit-tested in policy.rs)
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "99999"))
+            .mount(&server)
+            .await;
+        let started = std::time::Instant::now();
+        let err = policy_client(&server, 1000)
+            .get_json::<serde_json::Value>("/api/now/table/incident", &[])
+            .await
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waits are clamped"
+        );
+        assert_eq!(err.code().exit_code(), 7);
+        let env = err.to_envelope();
+        assert!(env.error.retry_after_secs.is_some());
+    }
+
+    #[tokio::test]
+    async fn patch_retries_once_on_an_instance_429_but_post_never_retries() {
+        // CT-26, CT-26b (NA-7)
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1")
+                    .set_body_json(serde_json::json!({ "error": { "message": "Rate limit" } })),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "result": {} })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1")
+                    .set_body_json(serde_json::json!({ "error": {} })),
+            )
+            .mount(&server)
+            .await;
+        let mutating = policy_client(&server, 1000).into_mutating(write_permit());
+        let _: serde_json::Value = mutating
+            .patch_json(
+                "/api/now/table/incident/abc",
+                &[],
+                &serde_json::json!({ "x": "1" }),
+            )
+            .await
+            .expect("patch retried once");
+        assert_eq!(count(&server, "PATCH").await, 2);
+
+        let err = mutating
+            .post_json::<_, serde_json::Value>(
+                "/api/now/table/incident",
+                &[],
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().exit_code(), 7);
+        assert_eq!(count(&server, "POST").await, 1, "a create is never retried");
+    }
+
+    #[tokio::test]
+    async fn a_write_that_times_out_after_sending_has_an_unknown_outcome() {
+        // CT-26c (NA-7)
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
+            .mount(&server)
+            .await;
+        let mutating = policy_client(&server, 100).into_mutating(write_permit());
+        let err = mutating
+            .patch_json::<_, serde_json::Value>(
+                "/api/now/table/incident/abc",
+                &[],
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().as_str(), "WRITE_OUTCOME_UNKNOWN");
+        assert_eq!(err.code().exit_code(), 7);
+        assert_eq!(count(&server, "PATCH").await, 1);
     }
 }
