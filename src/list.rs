@@ -24,6 +24,12 @@ pub struct RecordListEnvelope {
     #[serde(skip)]
     pub columns: Vec<String>,
     pub records: Vec<Value>,
+    /// More records may exist: without a count, inferred from `count == limit` (PERF-2).
+    #[serde(default)]
+    pub has_more: bool,
+    /// Total matching records, only with `--with-count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
     /// Filter values sent as typed because they could not be verified (Q-1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified_filters: Vec<crate::resolve_value::UnverifiedFilter>,
@@ -172,7 +178,11 @@ async fn execute_filtered_query(
     }
 
     let path = format!("/api/now/table/{table}");
-    let resp: Value = client.get_json(&path, &query_params).await?;
+    let (resp, total): (Value, Option<u64>) = if filters.with_count {
+        client.get_json_with_total(&path, &query_params).await?
+    } else {
+        (client.get_json(&path, &query_params).await?, None)
+    };
     let rows = resp
         .get("result")
         .and_then(Value::as_array)
@@ -243,6 +253,11 @@ async fn execute_filtered_query(
         limit: filters.limit,
         offset: filters.offset,
         columns,
+        has_more: match total {
+            Some(t) => u64::from(filters.offset) + (pruned_records.len() as u64) < t,
+            None => pruned_records.len() as u64 >= u64::from(filters.limit),
+        },
+        total,
         records: pruned_records,
         unverified_filters,
     })
@@ -289,8 +304,13 @@ pub fn format_record_list(envelope: &RecordListEnvelope, format: ResolvedOutputF
         ResolvedOutputFormat::Yaml => serde_yaml::to_string(envelope).unwrap_or_default(),
         ResolvedOutputFormat::Md => {
             let mut out = String::new();
+            let total = match (envelope.total, envelope.has_more) {
+                (Some(t), _) => format!(" of {t}"),
+                (None, true) => ", more available (use --offset or --with-count)".to_string(),
+                (None, false) => String::new(),
+            };
             out.push_str(&format!(
-                "# `{}` ({} records)\n\n- **Query**: `{}`\n\n",
+                "# `{}` ({} records{total})\n\n- **Query**: `{}`\n\n",
                 envelope.table, envelope.count, envelope.query
             ));
             out.push_str(&crate::resolve_value::unverified_filter_notes(

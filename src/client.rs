@@ -594,6 +594,33 @@ impl ReadOnlyClient {
         }
     }
 
+    /// Like [`Self::get_json`], also returning the `X-Total-Count` header. Sends
+    /// `sysparm_no_count=false` so the instance computes it (PERF-2).
+    pub async fn get_json_with_total<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<(T, Option<u64>), SncfrError> {
+        let url = self.endpoint_url(path)?;
+        let mut q: Vec<(&str, &str)> = query.to_vec();
+        q.push(("sysparm_no_count", "false"));
+        let defaults = table_read_defaults(path, &q);
+        crate::debug_log!("http", "GET (with total) {url}");
+        let resp = self
+            .send(crate::policy::RequestKind::Read, path, || {
+                self.auth
+                    .apply(self.http.get(url.clone()).query(&q).query(&defaults))
+            })
+            .await?;
+        let total = resp
+            .headers()
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let body = self.decode_json_response(resp, path, true).await?;
+        Ok((body, total))
+    }
+
     /// Performs an authenticated `GET` request and returns the raw response bytes (e.g., for attachment downloads).
     pub async fn get_bytes(
         &self,
