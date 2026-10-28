@@ -150,6 +150,11 @@ pub enum SncfrError {
         suggestion: Option<String>,
     },
 
+    #[error(
+        "This account is not authorized for the /api/{family}/ API ('{resource}'); the session itself is valid"
+    )]
+    ApiFamilyUnauthorized { family: String, resource: String },
+
     #[error("Request to '{resource}' timed out after {timeout_secs}s")]
     TimedOut { resource: String, timeout_secs: u64 },
 
@@ -223,6 +228,7 @@ impl SncfrError {
             Self::PackNotForInstance { .. } => ErrorCode::PackNotForInstance,
             Self::AmbiguousReference { .. } => ErrorCode::AmbiguousReference,
             Self::RateLimited { .. } | Self::TimedOut { .. } => ErrorCode::NetworkOrInstanceError,
+            Self::ApiFamilyUnauthorized { .. } => ErrorCode::AclForbidden,
             Self::WriteOutcomeUnknown { .. } => ErrorCode::WriteOutcomeUnknown,
         }
     }
@@ -261,6 +267,9 @@ impl SncfrError {
             Self::WriteNotApplied { .. } => Some(
                 "Do not retry. Report the not_applied fields to the user and check the record with `sncfr show`.".to_string(),
             ),
+            Self::ApiFamilyUnauthorized { family, .. } => Some(format!(
+                "Your role can read tables but not call /api/{family}/. Read-only commands fall back to the Table API where they can; ask your ServiceNow admin for the API role, or use the portal."
+            )),
             Self::TimedOut { timeout_secs, .. } => Some(format!(
                 "Re-run with a longer timeout, e.g. `--timeout {}`.",
                 (timeout_secs * 2).clamp(2, 300)
