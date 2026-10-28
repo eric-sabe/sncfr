@@ -90,6 +90,10 @@ pub enum Scenario {
     /// `sys_choice` returns the renumbered incident priorities and divergent incident /
     /// sc_req_item states (instead of the default empty result).
     ReadableChoices,
+    /// `/api/now/batch` answers 400 "Requested URI does not represent any resource".
+    BatchUriNotResource,
+    /// `sys_journal_field` answers after 2 s (past a `--timeout 1`).
+    SlowJournal,
 }
 
 pub struct Run {
@@ -157,6 +161,16 @@ impl ExampleCorp {
         &self.pack_path
     }
 
+    /// A file in this instance's cache directory (e.g. `capabilities.json`).
+    pub fn cache_file(&self, name: &str) -> PathBuf {
+        let key = self
+            .server
+            .uri()
+            .trim_start_matches("http://")
+            .replace(':', "_");
+        self.dir.path().join("cache").join(key).join(name)
+    }
+
     async fn get(&self, table: &str, body: Value) {
         Mock::given(method("GET"))
             .and(path(format!("/api/now/table/{table}")))
@@ -192,6 +206,26 @@ impl ExampleCorp {
 
     pub async fn mount(&self, scenario: Scenario) {
         match scenario {
+            Scenario::BatchUriNotResource => {
+                Mock::given(method("POST"))
+                    .and(path("/api/now/batch"))
+                    .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                        "error": { "message": "Requested URI does not represent any resource", "detail": null }
+                    })))
+                    .mount(&self.server)
+                    .await;
+            }
+            Scenario::SlowJournal => {
+                Mock::given(method("GET"))
+                    .and(path("/api/now/table/sys_journal_field"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(json!({ "result": [] }))
+                            .set_delay(std::time::Duration::from_secs(2)),
+                    )
+                    .mount(&self.server)
+                    .await;
+            }
             Scenario::ReadableChoices => {
                 // Mounted later, so it takes priority over the base empty sys_choice mock.
                 Mock::given(method("GET"))

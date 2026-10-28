@@ -122,6 +122,51 @@ pub struct TicketDossier {
     pub attachments: Vec<AttachmentMeta>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acl_warnings: Vec<String>,
+    /// Status of every fetched section (CAP-3): `ok`, `restricted` (403), `unavailable` (404 or
+    /// invalid table), `timed_out`, or `error`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sections: BTreeMap<String, SectionStatus>,
+    /// Sections that are not `ok`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SectionStatus {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// What happened to one sub-request.
+fn section_status(sub: &crate::client::ServicedSubResponse) -> SectionStatus {
+    let (status, detail) = match sub.status_code {
+        200..=299 => ("ok", None),
+        403 => ("restricted", Some("403 Forbidden".to_string())),
+        404 => (
+            "unavailable",
+            Some("not available on this instance (404)".to_string()),
+        ),
+        408 => (
+            "timed_out",
+            Some(format!(
+                "timed out after {}s",
+                crate::policy::current().timeout.as_secs()
+            )),
+        ),
+        400 if sub
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("invalid table")) =>
+        {
+            ("unavailable", Some("invalid table".to_string()))
+        }
+        code => ("error", Some(format!("HTTP {code}"))),
+    };
+    SectionStatus {
+        status: status.to_string(),
+        detail,
+    }
 }
 
 /// Assembles a [`TicketDossier`] for a single ticket identifier using a composite `/api/now/batch` request.
@@ -227,9 +272,44 @@ pub async fn assemble_ticket_dossier(
     );
     batch_reqs.push(BatchGetSubRequest::new("attachments", attachments_url));
 
-    let batch_resp = client
-        .batch_get_with_fallback(&format!("dossier-{}", resolved.number), &batch_reqs)
+    // Batch is an optimization (ADR-0003 amendment): skipped when the capability record says it
+    // doesn't work here, and its failures are remembered.
+    use crate::capabilities::{CapSource, CapState, Capability, CapabilityRecord};
+    let try_batch = crate::capabilities::state(cache, Capability::BatchApi).worth_trying();
+    let (batch_resp, batch_path) = client
+        .get_all(
+            &format!("dossier-{}", resolved.number),
+            &batch_reqs,
+            try_batch,
+        )
         .await?;
+    match &batch_path {
+        crate::client::BatchPath::Batch => CapabilityRecord::observe(
+            cache,
+            Capability::BatchApi,
+            CapState::Available,
+            CapSource::Observed,
+            Some(200),
+            None,
+        ),
+        crate::client::BatchPath::Fallback(failure) => {
+            if let Some((state, hint)) = failure.persistent {
+                CapabilityRecord::observe(
+                    cache,
+                    Capability::BatchApi,
+                    state,
+                    CapSource::Observed,
+                    failure.http_status,
+                    Some(hint),
+                );
+            }
+        }
+        crate::client::BatchPath::Skipped => {}
+    }
+    let mut sections: BTreeMap<String, SectionStatus> = BTreeMap::new();
+    for sub in &batch_resp.serviced_requests {
+        sections.insert(sub.id.clone(), section_status(sub));
+    }
 
     let mut acl_warnings = Vec::new();
 
@@ -418,6 +498,27 @@ pub async fn assemble_ticket_dossier(
         }
     }
 
+    let degraded: Vec<String> = sections
+        .iter()
+        .filter(|(_, st)| st.status != "ok")
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in &degraded {
+        let st = &sections[name];
+        let note = format!(
+            "{name}: {} ({})",
+            st.status,
+            st.detail.as_deref().unwrap_or("no detail")
+        );
+        if st.status != "restricted"
+            && !acl_warnings
+                .iter()
+                .any(|w| w.starts_with(&format!("{name}:")))
+        {
+            acl_warnings.push(note);
+        }
+    }
+
     Ok(TicketDossier {
         number: resolved.number,
         table: resolved.table,
@@ -430,6 +531,8 @@ pub async fn assemble_ticket_dossier(
         related,
         attachments,
         acl_warnings,
+        sections,
+        degraded,
     })
 }
 
@@ -524,7 +627,19 @@ fn format_single_dossier_md(d: &TicketDossier) -> String {
         .get("short_description")
         .map(|f| f.display_value.as_str())
         .unwrap_or("(no short description)");
-    out.push_str(&format!("# {} — {}\n\n", d.number, short_desc));
+    out.push_str(&format!(
+        "# {} — {}\n\n",
+        d.number,
+        crate::untrusted::inline(short_desc)
+    ));
+    if !d.degraded.is_empty() {
+        let parts: Vec<String> = d
+            .degraded
+            .iter()
+            .map(|name| format!("{name} {}", d.sections[name].status.replace('_', " ")))
+            .collect();
+        out.push_str(&format!("⚠ Partial dossier: {}.\n\n", parts.join("; ")));
+    }
     out.push_str(&format!(
         "- **Table**: `{}` (`sys_id={}`)\n",
         d.table, d.sys_id
