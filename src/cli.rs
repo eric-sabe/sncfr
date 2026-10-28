@@ -65,6 +65,11 @@ pub struct Cli {
     #[arg(long, global = true, env = "SNCFR_PACK")]
     pub pack: Option<PathBuf>,
 
+    /// Send these UNVERIFIABLE fields exactly as typed (explicit names only; catalog variables
+    /// as `var:<name>`). Only on explicit user instruction (SAFE-4)
+    #[arg(long, global = true, value_delimiter = ',', value_name = "FIELD,...")]
+    pub allow_unverified: Vec<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

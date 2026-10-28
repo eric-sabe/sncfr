@@ -154,6 +154,25 @@ impl ExampleCorp {
         }
     }
 
+    /// Mounts `PATCH /api/now/table/incident/<sys_id>` answering with `record` (the `result`).
+    pub async fn mount_incident_patch(&self, record: Value) {
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/now/table/incident/{INCIDENT_SYS_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": record })))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Request bodies of every PATCH sent.
+    pub async fn patch_bodies(&self) -> Vec<Value> {
+        self.requests()
+            .await
+            .into_iter()
+            .filter(|r| r.method.as_str() == "PATCH")
+            .map(|r| serde_json::from_slice(&r.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
     /// Runs the real binary non-interactively against the mock instance.
     pub fn run(&self, args: &[&str]) -> Run {
         let out = Command::new(env!("CARGO_BIN_EXE_sncfr"))
