@@ -125,6 +125,22 @@ async fn main() -> ExitCode {
         }
     }
 
+    match sncfr::policy::resolve_timeout(
+        cli.timeout,
+        resolved_profile.as_ref().and_then(|p| p.timeout_secs),
+    ) {
+        Ok(timeout) => {
+            sncfr::policy::install(sncfr::policy::RequestPolicy::new(
+                timeout,
+                sncfr::pack::active().safety.max_requests_per_minute,
+            ));
+        }
+        Err(err) => {
+            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+            return err.exit_code();
+        }
+    }
+
     match sncfr::write_gate::AllowList::parse(&cli.allow_unverified) {
         Ok(list) => {
             sncfr::write_gate::install_allow_list(list);
