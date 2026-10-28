@@ -134,6 +134,7 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 | `--group Storage` where only `Storage - L2` exists (pack suffixes) | not found | resolves via suffix, shown as `group:suffix " - L2"` |
 | A field the instance silently ignored on write | reported as committed | exit `9` `WRITE_NOT_APPLIED` with `not_applied` |
 | `--write` with a pack whose `instances` excludes this instance | n/a | exit `2` `PACK_NOT_FOR_INSTANCE` |
+| `list --group Network` with pack suffixes | `assignment_group.name=Network` | `assignment_group.nameINNetwork,Network - L2,Network - L3`, with a footer note |
 
 ---
 

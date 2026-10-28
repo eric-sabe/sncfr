@@ -142,7 +142,11 @@ async fn execute_filtered_query(
     eq.validate()?;
 
     // Default sort by `sys_updated_on` descending when no sort order was specified
-    let plan = crate::query::plan_open_rules(crate::pack::active(), &table, filters)?;
+    let mut plan = crate::query::plan_open_rules(crate::pack::active(), &table, filters)?;
+    plan.notes.extend(crate::query::group_expansion_note(
+        crate::pack::active(),
+        filters,
+    ));
     let mut query_str = eq.build_with(&plan);
     if !query_str.contains("ORDERBY") {
         eq.order_by_desc("sys_updated_on");

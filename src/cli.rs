@@ -262,8 +262,9 @@ pub struct ListFilterArgs {
     #[arg(long)]
     pub opened_by: Option<String>,
 
-    /// Filter by assignment group (`@my-groups`, group name, or `sys_id`)
-    #[arg(short, long)]
+    /// Filter by assignment group (`@my-groups`, group name, or `sys_id`); names expand through
+    /// the Instance Pack's group suffixes
+    #[arg(short, long, visible_aliases = ["assignment-group"])]
     pub group: Option<String>,
 
     /// Filter by watch list member (`@me`, username, or `sys_id`)
@@ -469,7 +470,7 @@ pub struct UpdateArgs {
     pub assign_to: Option<String>,
 
     /// Assign ticket to assignment group (group name or `sys_id`)
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["assignment-group", "assign-to-group"])]
     pub group: Option<String>,
 
     /// Update `short_description`
@@ -535,7 +536,7 @@ pub struct CreateArgs {
     pub assign_to: Option<String>,
 
     /// Assignment group (group name or `sys_id`)
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["assignment-group", "assign-to-group"])]
     pub group: Option<String>,
 
     /// Caller / requested-for user (`@me`, username, email, or `sys_id`)
