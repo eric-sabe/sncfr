@@ -1,0 +1,15 @@
+{
+  "sys_user": {
+    "result": [{
+      "sys_id": { "value": "11111111111111111111111111111111", "display_value": "11111111111111111111111111111111" },
+      "user_name": { "value": "pat.example", "display_value": "pat.example" },
+      "name": { "value": "Pat Example", "display_value": "Pat Example" },
+      "email": { "value": "pat.example@example.com", "display_value": "pat.example@example.com" }
+    }]
+  },
+  "sys_user_grmember": {
+    "result": [
+      { "group": { "value": "33333333333333333333333333333333", "display_value": "Network - L2" } }
+    ]
+  }
+}

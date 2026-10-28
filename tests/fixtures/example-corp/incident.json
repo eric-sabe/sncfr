@@ -1,0 +1,13 @@
+{
+  "result": [{
+    "sys_id": { "value": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0", "display_value": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0" },
+    "number": { "value": "INC0012345", "display_value": "INC0012345" },
+    "sys_class_name": { "value": "incident", "display_value": "Incident" },
+    "state": { "value": "2", "display_value": "In Progress" },
+    "priority": { "value": "3", "display_value": "3 - Moderate" },
+    "short_description": { "value": "VPN drops for the Example Corp branch", "display_value": "VPN drops for the Example Corp branch" },
+    "assignment_group": { "value": "33333333333333333333333333333333", "display_value": "Network - L2" },
+    "u_tier": { "value": "", "display_value": "" },
+    "sys_updated_on": { "value": "2026-10-22 10:00:00", "display_value": "2026-10-22 10:00:00" }
+  }]
+}
