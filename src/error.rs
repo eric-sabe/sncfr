@@ -150,6 +150,9 @@ pub enum SncfrError {
         suggestion: Option<String>,
     },
 
+    #[error("Request to '{resource}' timed out after {timeout_secs}s")]
+    TimedOut { resource: String, timeout_secs: u64 },
+
     #[error("Rate limited (429) on '{resource}'; retry after {retry_after_secs}s")]
     RateLimited {
         resource: String,
@@ -219,7 +222,7 @@ impl SncfrError {
             Self::WriteNotApplied { .. } => ErrorCode::WriteNotApplied,
             Self::PackNotForInstance { .. } => ErrorCode::PackNotForInstance,
             Self::AmbiguousReference { .. } => ErrorCode::AmbiguousReference,
-            Self::RateLimited { .. } => ErrorCode::NetworkOrInstanceError,
+            Self::RateLimited { .. } | Self::TimedOut { .. } => ErrorCode::NetworkOrInstanceError,
             Self::WriteOutcomeUnknown { .. } => ErrorCode::WriteOutcomeUnknown,
         }
     }
@@ -258,6 +261,10 @@ impl SncfrError {
             Self::WriteNotApplied { .. } => Some(
                 "Do not retry. Report the not_applied fields to the user and check the record with `sncfr show`.".to_string(),
             ),
+            Self::TimedOut { timeout_secs, .. } => Some(format!(
+                "Re-run with a longer timeout, e.g. `--timeout {}`.",
+                (timeout_secs * 2).clamp(2, 300)
+            )),
             Self::RateLimited { retry_after_secs, .. } => Some(format!(
                 "Wait {retry_after_secs}s, then retry at most once."
             )),
