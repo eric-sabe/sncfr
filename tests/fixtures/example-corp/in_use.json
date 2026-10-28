@@ -1,0 +1,9 @@
+{
+  "renumbered": {
+    "priority": [["0", "0 - Emergency"], ["1", "1 - Critical"], ["2", "2 - High"], ["3", "3 - Moderate"], ["4", "4 - Minor"], ["5", "5 - Low"]],
+    "u_tier": [["silver", "Silver"], ["bronze", "Bronze"]]
+  },
+  "ootb_low": {
+    "priority": [["1", "1 - Critical"], ["2", "2 - High"], ["3", "3 - Moderate"], ["4", "4 - Low"]]
+  }
+}
