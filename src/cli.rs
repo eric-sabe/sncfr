@@ -61,6 +61,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "SNCFR_LOG_FILE")]
     pub log_file: Option<PathBuf>,
 
+    /// Instance Pack layered over the profile's `pack =` for this invocation (ADR-0004)
+    #[arg(long, global = true, env = "SNCFR_PACK")]
+    pub pack: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

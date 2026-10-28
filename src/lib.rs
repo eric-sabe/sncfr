@@ -75,6 +75,7 @@ mod tests {
                 username: None,
                 read_only: true,
                 views: BTreeMap::new(),
+                ..Default::default()
             },
         );
 
