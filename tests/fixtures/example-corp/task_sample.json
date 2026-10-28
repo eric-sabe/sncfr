@@ -1,0 +1,54 @@
+{
+  "result": [
+    {
+      "number": {
+        "value": "ABC-1234567",
+        "display_value": "ABC-1234567"
+      },
+      "sys_class_name": {
+        "value": "u_abc_request",
+        "display_value": "u_abc_request"
+      }
+    },
+    {
+      "number": {
+        "value": "ABC-1234566",
+        "display_value": "ABC-1234566"
+      },
+      "sys_class_name": {
+        "value": "u_abc_request",
+        "display_value": "u_abc_request"
+      }
+    },
+    {
+      "number": {
+        "value": "ABC-1234565",
+        "display_value": "ABC-1234565"
+      },
+      "sys_class_name": {
+        "value": "u_abc_request",
+        "display_value": "u_abc_request"
+      }
+    },
+    {
+      "number": {
+        "value": "INC0012345",
+        "display_value": "INC0012345"
+      },
+      "sys_class_name": {
+        "value": "incident",
+        "display_value": "incident"
+      }
+    },
+    {
+      "number": {
+        "value": "INC0012344",
+        "display_value": "INC0012344"
+      },
+      "sys_class_name": {
+        "value": "incident",
+        "display_value": "incident"
+      }
+    }
+  ]
+}

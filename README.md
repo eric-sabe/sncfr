@@ -152,6 +152,9 @@ pbpaste | sncfr auth import --profile prod
 # Inspect @me identity, @my-groups memberships, and ACL capability matrix across 12 tables
 sncfr auth status
 sncfr doctor
+
+# Locked-down or customized instance? Write a draft Instance Pack from what you can read
+sncfr discover            # then follow the printed next steps; add --no-samples to read no record rows
 ```
 
 ### 2. Explore Queues, Stats, & Activity Feeds (Read-Only)

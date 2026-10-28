@@ -16,6 +16,19 @@ pub async fn load_or_sync_table_schema(
     table_or_prefix: &str,
     force_sync: bool,
 ) -> Result<CachedTableSchema, SncfrError> {
+    load_or_sync_table_schema_with(client, cache, table_or_prefix, force_sync, true).await
+}
+
+/// As [`load_or_sync_table_schema`]; `allow_sample = false` never reads a record row
+/// (`discover --no-samples`). A schema that would have needed the sample is then returned but
+/// not cached, so later commands still get sample-record typing.
+pub async fn load_or_sync_table_schema_with(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    table_or_prefix: &str,
+    force_sync: bool,
+    allow_sample: bool,
+) -> Result<CachedTableSchema, SncfrError> {
     let prefixes = load_or_sync_prefixes(client, cache, force_sync).await?;
     let table = resolve_table_name(table_or_prefix, &prefixes);
 
@@ -136,7 +149,8 @@ pub async fn load_or_sync_table_schema(
 
     // `sys_dictionary` 403 or zero visible rows (common for non-admins): infer fields from one
     // sample record so they can at least be told apart from unknown names.
-    if fields.is_empty() && child_field_overrides.is_empty() {
+    let needs_sample = fields.is_empty() && child_field_overrides.is_empty();
+    if needs_sample && allow_sample {
         let sample_path = format!("/api/now/table/{table}");
         if let Ok(sample_resp) = client
             .get_json::<Value>(
@@ -260,7 +274,9 @@ pub async fn load_or_sync_table_schema(
         loaded_from_cache: false,
     };
 
-    let _ = cache.write_table_schema(&schema);
+    if allow_sample || !needs_sample {
+        let _ = cache.write_table_schema(&schema);
+    }
     Ok(schema)
 }
 

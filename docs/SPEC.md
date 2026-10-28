@@ -188,6 +188,14 @@ Commands that accept a `<TICKET>` identifier accept any ticket number, with one 
   - the **capability record** (§7.2).
 
   Probes are recorded as observations. Tables in `doctor.absent_tables_ok` that return 400/404 are reported as `not installed`, not as problems. `--refresh` forgets the record first and also probes the catalog API. `sncfr auth status` also reports the pack.
+- **`sncfr discover [--out <file>] [--force] [--no-samples]`** (DISC-4, DISC-5) — Probes the instance read-only and writes a **draft** Instance Pack (`status = "draft"`, `instances = ["<host>"]`), mode `0600`. The default path is `<config dir>/packs/<instance-host>.draft.pack.toml`. An existing file is never overwritten without `--force` (exit `2`). Probes:
+  1. capabilities, as `doctor --refresh` (rewrites `capabilities.json`);
+  2. prefixes from `sys_number` and the 200 most recent `task` rows (`number`, `sys_class_name` only), keeping mappings that differ from the bundled defaults;
+  3. in-use choice values via the Aggregate API for each choice-typed `discovery.choice_fields` entry (reference and free-text fields are skipped and listed as `# skipped`; a field whose `sys_choice` set is readable needs no entry);
+  4. the custom field inventory: `u_*`/`x_*` names and inferred types from one sample per table, as `# custom field:` comments. Choice-typed fields are added to `discovery.choice_fields`;
+  5. group-name suffixes from `sys_user_group` names (`sysparm_fields=name`), kept when at least 3 groups end with one and it passes the suffix rule.
+
+  Each entry carries a `# observed:` comment citing its evidence, and each choice set is marked in-use only. The draft's first line warns that it contains instance metadata. It holds no sys_ids, user names, emails, display names, record values, response text, or full group names. Group names are read in memory and only suffix strings are kept. `--no-samples` reads no record rows: it skips the doctor probes and steps 2's `task` sample, 4, and 5, so prefixes come from `sys_number` only. It ends by printing the path and five next steps (review, `pack validate`, `pack show`, set `pack =` in the profile, then set `status = "active"`). `pack validate` locations never point into comment lines.
 - **`sncfr pack validate <path>`** — Strictly parses and semantically validates one pack file (§7.3). It reports every problem as `<file>:<line>:<col>: <key>: <message>` and exits `2` (`PACK_INVALID`) on errors; warnings (draft status, complete-choice-set notices) still exit `0`. It runs without authentication, even when the profile's own pack is broken.
 - **`sncfr pack show [--toml]`** — Prints the merged pack (`ootb` ⊕ profile pack ⊕ `--pack`): a summary with per-entry origin (`ootb`/`profile`/`override`), safety keys, and hash; `--json`/`-o yaml` for the full structure; `--toml` for a re-loadable single pack file.
 
