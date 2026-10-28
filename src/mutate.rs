@@ -370,13 +370,7 @@ pub async fn execute_create(
 
     if let Some(caller) = &args.caller {
         let (after_disp, after_val) = resolve_user_reference(&client, cache, caller).await?;
-        let caller_field = if table == "incident" {
-            "caller_id"
-        } else if table == "sc_req_item" || table == "sc_request" {
-            "requested_for"
-        } else {
-            "opened_by"
-        };
+        let caller_field = crate::pack::active().caller_field(&table);
         diffs.push(FieldDiff {
             field: caller_field.to_string(),
             before_display: None,

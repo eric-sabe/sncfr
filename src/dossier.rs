@@ -12,50 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-const CURATED_CORE_FIELDS: &[&str] = &[
-    "number",
-    "sys_class_name",
-    "state",
-    "incident_state",
-    "stage",
-    "approval",
-    "priority",
-    "urgency",
-    "impact",
-    "severity",
-    "category",
-    "subcategory",
-    "short_description",
-    "description",
-    "caller_id",
-    "requested_for",
-    "opened_by",
-    "assignment_group",
-    "assigned_to",
-    "cmdb_ci",
-    "business_service",
-    "parent",
-    "request",
-    "request_item",
-    "problem_id",
-    "rfc",
-    "sys_created_on",
-    "sys_updated_on",
-    "resolved_at",
-    "closed_at",
-    "close_code",
-    "close_notes",
-    "work_start",
-    "work_end",
-    "start_date",
-    "end_date",
-    "justification",
-    "implementation_plan",
-    "backout_plan",
-    "test_plan",
-    "watch_list",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldValue {
     pub display_value: String,
@@ -206,7 +162,7 @@ pub async fn assemble_ticket_dossier(
             }
         }
     } else {
-        for &field_name in CURATED_CORE_FIELDS {
+        for field_name in &crate::pack::active().core.dossier_core_fields {
             if let Some((disp, raw)) = extract_field_pair(&resolved.record, field_name) {
                 core_fields.insert(field_name.to_string(), FieldValue::from_pair(disp, raw));
             }
