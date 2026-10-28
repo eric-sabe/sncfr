@@ -47,6 +47,13 @@ If you just want the `sncfr` command on your `PATH` without managing a local Git
 cargo install --git https://github.com/eric-sabe/sncfr.git
 ```
 
+> [!IMPORTANT]
+> `main` is currently **0.2.0-dev** (brownfield instance support, in progress; see [`docs/specs/brownfield-instance-support.md`](docs/specs/brownfield-instance-support.md)). For the latest stable release, pin the tag:
+>
+> ```bash
+> cargo install --git https://github.com/eric-sabe/sncfr.git --tag v0.1.6
+> ```
+
 Cargo will download the source, compile an optimized release binary, and install it to `~/.cargo/bin/sncfr`. Verify it works:
 
 ```bash
@@ -87,7 +94,7 @@ cargo install --path .
 ## Testing
 
 ### 1. Offline Unit & End-to-End (`wiremock`) Test Suite
-The repository includes 43 unit tests and a full-binary `wiremock` E2E test suite ([`tests/e2e_cli.rs`](tests/e2e_cli.rs)) that exercises authentication, `doctor`, `show`, `list`, `stats`, dry-run validation, `--write` mutations, and `SNCFR_READ_ONLY=1` locks without requiring a live ServiceNow instance:
+The repository includes 48 unit tests and a full-binary `wiremock` E2E test suite ([`tests/e2e_cli.rs`](tests/e2e_cli.rs)) that exercises authentication, `doctor`, `show`, `list`, `stats`, dry-run validation, `--write` mutations, and `SNCFR_READ_ONLY=1` locks without requiring a live ServiceNow instance:
 
 ```bash
 # Run all unit and integration tests
@@ -100,6 +107,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ### 2. Live Instance Functional & Smoke Testing
 See [`docs/TESTING.md`](docs/TESTING.md) for a step-by-step functional test plan against a live Corporate SSO ServiceNow instance (Phases 0–4 are 100% read-only, including Validated Dry-Run Previews and `SNCFR_READ_ONLY=1` lock verification).
+
+---
+
+## Behavior changes from 0.1.x
+
+Changes in 0.2.0 that existing users and agents will notice are listed here as they land on `main`.
+
+| Situation | 0.1.x | 0.2.0 |
+|---|---|---|
 
 ---
 

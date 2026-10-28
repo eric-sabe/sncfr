@@ -1,6 +1,6 @@
 # `sncfr` Technical & Product Specification
 
-- **Status**: Living Specification (v0.1.6)
+- **Status**: Living Specification (v0.2.0-dev; last release v0.1.6)
 - **Last Updated**: 2026-10-22
 - **Target Persona**: Non-admin ServiceNow users (both ticket-monitors/explorers and ITIL fulfillers/handlers) and AI coding/operations agents acting on their behalf.
 
@@ -213,5 +213,6 @@ watched = { table = "task", query = "watch_listLIKEjavascript:gs.getUserID()^act
 ### 7.2 Local Metadata Cache (`~/.cache/sncfr/<instance>/` or `SNCFR_CACHE_DIR`)
 
 - `identity.json`: Cached `@me` user `sys_id`, `user_name`, display name, and group `sys_id`/name list (TTL: 24h).
-- `prefixes.json`: Cached `sys_number` prefix $\to$ table name mapping (TTL: 7d), merged with built-in defaults (`INC` $\to$ `incident`, `CHG` $\to$ `change_request`, `RITM` $\to$ `sc_req_item`, `REQ` $\to$ `sc_request`, `SCTASK` $\to$ `sc_task`, `PRB` $\to$ `problem`, `CS` $\to$ `sn_customerservice_case`, `TASK` $\to$ `task`, `KB` $\to$ `kb_knowledge`).
+- `prefixes.json`: Cached `sys_number` prefix $\to$ table name mapping (TTL: 7d), merged on read with the 12 built-in defaults (`INC` $\to$ `incident`, `CHG` $\to$ `change_request`, `RITM` $\to$ `sc_req_item`, `REQ` $\to$ `sc_request`, `SCTASK` $\to$ `sc_task`, `TASK` $\to$ `task`, `PRB` $\to$ `problem`, `PTASK` $\to$ `problem_task`, `CTASK` $\to$ `change_task`, `CS` $\to$ `sn_customerservice_case`, `KB` $\to$ `kb_knowledge`, `HR` $\to$ `sn_hr_core_case`). Prefixes learned from the `task` fallback (§5.1 step 3) are added to the same file.
 - `schemas/<table>.json`: Cached field labels, custom field metadata (`u_*`, `x_*`), and `sys_choice` valid values per table (TTL: 24h).
+- **On-disk format**: every cache file is a JSON envelope `{ "fetched_at": <RFC 3339>, "ttl_seconds": <n>, "data": <payload> }`, written atomically (temp file + rename). A corrupt or unreadable file is treated as a cache miss.
