@@ -163,6 +163,10 @@ pub async fn load_or_sync_table_schema(
                     .get("display_value")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                let link_table = v
+                    .get("link")
+                    .and_then(Value::as_str)
+                    .and_then(crate::untrusted::link_table);
                 let internal_type = if v.get("link").is_some() {
                     "inferred_reference"
                 } else if !value.is_empty() && display != value {
@@ -177,7 +181,7 @@ pub async fn load_or_sync_table_schema(
                         internal_type: internal_type.to_string(),
                         mandatory: false,
                         max_length: None,
-                        reference_table: None,
+                        reference_table: link_table,
                         is_custom: k.starts_with("u_") || k.starts_with("x_"),
                     },
                 );
