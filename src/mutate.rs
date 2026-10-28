@@ -7,7 +7,9 @@ use crate::client::{
 use crate::error::SncfrError;
 use crate::output::{ResolvedOutputFormat, osc8_link};
 use crate::resolve::{load_or_sync_prefixes, resolve_table_name, resolve_ticket};
-use crate::resolve_value::{ResolveCtx, ResolvedValue, resolve_choice, resolve_field};
+use crate::resolve_value::{
+    ResolveCtx, ResolvedValue, discover_in_use, resolve_choice, resolve_field,
+};
 use crate::schema::load_or_sync_table_schema;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
@@ -301,6 +303,21 @@ pub async fn execute_comment_or_note(
     Ok(report)
 }
 
+/// The fields a mutation sets through choice flags or `--set` (malformed pairs are skipped here
+/// and rejected where they are parsed), for in-use discovery before resolution.
+fn mutation_fields(choice_flags: &[(&str, &Option<String>)], set_fields: &[String]) -> Vec<String> {
+    choice_flags
+        .iter()
+        .filter(|(_, v)| v.is_some())
+        .map(|(f, _)| (*f).to_string())
+        .chain(
+            set_fields
+                .iter()
+                .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.trim().to_string())),
+        )
+        .collect()
+}
+
 /// Executes `sncfr update <TICKET> [flags] [--write]`.
 pub async fn execute_update(
     client: ReadOnlyClient,
@@ -316,12 +333,28 @@ pub async fn execute_update(
         resolved.table, resolved.sys_id
     );
 
-    let ctx = ResolveCtx {
+    let probe = ResolveCtx {
         pack: crate::pack::active(),
         table: &resolved.table,
         schema: &schema,
         sample: Some(&resolved.record),
         discovered: None,
+    };
+    let wanted = mutation_fields(
+        &[
+            ("state", &args.state),
+            ("priority", &args.priority),
+            ("urgency", &args.urgency),
+            ("impact", &args.impact),
+            ("close_code", &args.close_code),
+        ],
+        &args.set_fields,
+    );
+    let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
+    let discovered = discover_in_use(&client, cache, &probe, &wanted).await?;
+    let ctx = ResolveCtx {
+        discovered: Some(&discovered),
+        ..probe
     };
     let mut diffs = Vec::new();
     let mut fields: Vec<ResolvedField> = Vec::new();
@@ -460,12 +493,26 @@ pub async fn execute_create(
     let prefixes = load_or_sync_prefixes(&client, cache, false).await?;
     let table = resolve_table_name(&args.table_or_prefix, &prefixes);
     let schema = load_or_sync_table_schema(&client, cache, &table, false).await?;
-    let ctx = ResolveCtx {
+    let probe = ResolveCtx {
         pack: crate::pack::active(),
         table: &table,
         schema: &schema,
         sample: None,
         discovered: None,
+    };
+    let wanted = mutation_fields(
+        &[
+            ("priority", &args.priority),
+            ("urgency", &args.urgency),
+            ("impact", &args.impact),
+        ],
+        &args.set_fields,
+    );
+    let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
+    let discovered = discover_in_use(&client, cache, &probe, &wanted).await?;
+    let ctx = ResolveCtx {
+        discovered: Some(&discovered),
+        ..probe
     };
 
     let mut diffs = Vec::new();

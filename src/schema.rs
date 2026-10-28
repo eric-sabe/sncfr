@@ -198,7 +198,7 @@ pub async fn load_or_sync_table_schema(
     let mut base_choices: BTreeMap<String, Vec<CachedChoice>> = BTreeMap::new();
     let mut child_choices: BTreeMap<String, Vec<CachedChoice>> = BTreeMap::new();
 
-    if let Ok(resp) = client
+    let choice_resp = client
         .get_json::<Value>(
             "/api/now/table/sys_choice",
             &[
@@ -208,7 +208,9 @@ pub async fn load_or_sync_table_schema(
                 ("sysparm_limit", "1000"),
             ],
         )
-        .await
+        .await;
+    observe_choice_table_filter(cache, &choice_resp);
+    if let Ok(resp) = choice_resp
         && let Some(rows) = resp.get("result").and_then(Value::as_array)
     {
         for row in rows {
@@ -260,6 +262,33 @@ pub async fn load_or_sync_table_schema(
 
     let _ = cache.write_table_schema(&schema);
     Ok(schema)
+}
+
+/// Records `choice_table_filter` from the `sys_choice` read (resolution step 2's input): rows →
+/// available, zero rows → unavailable (the query always includes `task`, which has choices on
+/// every instance, so zero rows means the ACL filtered them), 403 → unauthorized.
+fn observe_choice_table_filter(cache: &InstanceCache, resp: &Result<Value, SncfrError>) {
+    use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
+    let (state, status, hint) = match resp {
+        Ok(v)
+            if v.get("result")
+                .and_then(Value::as_array)
+                .is_some_and(|r| !r.is_empty()) =>
+        {
+            (CapState::Available, 200, None)
+        }
+        Ok(_) => (CapState::Unavailable, 200, Some(CapHint::ZeroRows)),
+        Err(SncfrError::AclForbidden { .. }) => (CapState::Unauthorized, 403, Some(CapHint::Acl)),
+        Err(_) => return,
+    };
+    CapabilityRecord::observe(
+        cache,
+        Capability::ChoiceTableFilter,
+        state,
+        CapSource::Observed,
+        Some(status),
+        hint,
+    );
 }
 
 /// Resolves a choice label or raw value (e.g. `"In Progress"` -> `("In Progress", "2")`) for
