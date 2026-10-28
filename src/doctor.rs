@@ -30,6 +30,20 @@ pub struct DoctorReport {
     pub capabilities: Vec<CapabilityCheck>,
     /// Merged Instance Pack identity and active workarounds (PACK-6, PACK-7).
     pub pack: crate::pack::PackSummary,
+    /// The capability record after this run's probes (CAP-6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_record: Vec<crate::capabilities::CapStatus>,
+    /// Whether the merged pack lists this instance (NA-14).
+    #[serde(default = "default_true")]
+    pub pack_binds_instance: bool,
+    /// User-pack choice entries that readable instance metadata contradicts (missing value or
+    /// different label).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pack_drift: Vec<String>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// What sncfr does instead when a well-known probe table is forbidden.
@@ -51,8 +65,13 @@ fn probe_fallback_note(table: &str) -> &'static str {
 
 /// `(resource id, endpoint, 403 note)` for every probe: the pack's `core.probe_tables` (ADR-0004)
 /// plus the Aggregate API.
+#[cfg(test)]
 fn probed_resources() -> Vec<(String, String, String)> {
-    let mut probes: Vec<(String, String, String)> = crate::pack::active()
+    probed_resources_for(crate::pack::active())
+}
+
+fn probed_resources_for(pack: &crate::pack::MergedPack) -> Vec<(String, String, String)> {
+    let mut probes: Vec<(String, String, String)> = pack
         .core
         .probe_tables
         .iter()
@@ -79,9 +98,25 @@ pub async fn execute_doctor(
     client: &ReadOnlyClient,
     cache: &InstanceCache,
 ) -> Result<DoctorReport, SncfrError> {
+    execute_doctor_with(profile, client, cache, crate::pack::active(), false).await
+}
+
+/// `sncfr doctor [--refresh]` against `pack`. `refresh` forgets the capability record first and
+/// also probes the catalog API.
+pub async fn execute_doctor_with(
+    profile: &ResolvedProfile,
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    pack: &crate::pack::MergedPack,
+    refresh: bool,
+) -> Result<DoctorReport, SncfrError> {
+    use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
+    if refresh {
+        CapabilityRecord::clear(cache);
+    }
     let identity = resolve_current_identity(client, cache, true).await?;
 
-    let probes = probed_resources();
+    let probes = probed_resources_for(pack);
     let sub_requests: Vec<BatchGetSubRequest> = probes
         .iter()
         .map(|(res, url, _)| BatchGetSubRequest::new(res, url))
@@ -159,6 +194,120 @@ pub async fn execute_doctor(
         }
     }
 
+    // CAP-5: tables the pack says may be missing are "not installed", not problems.
+    for c in &mut capabilities {
+        if let Some(table) = c.resource.strip_prefix("table:")
+            && pack.doctor_absent_tables_ok.iter().any(|t| t == table)
+            && matches!(c.status_code, 400 | 404)
+        {
+            c.note = "not installed".to_string();
+        }
+    }
+
+    // Probes are observations (CAP-6).
+    let probe_state = |code: u16| match code {
+        200..=299 => (CapState::Available, None),
+        403 => (CapState::Unauthorized, Some(CapHint::Acl)),
+        400 => (CapState::Unavailable, Some(CapHint::InvalidTable)),
+        _ => (CapState::Unavailable, None),
+    };
+    for (resource, cap) in [
+        ("api:batch", Capability::BatchApi),
+        ("table:sys_number", Capability::NumberTableReadable),
+        ("table:sys_choice", Capability::ChoiceTableFilter),
+        ("table:sys_dictionary", Capability::DictionaryReadable),
+        ("api:stats", Capability::StatsGroupBy),
+    ] {
+        if let Some(c) = capabilities.iter().find(|c| c.resource == resource) {
+            let (state, hint) = probe_state(c.status_code);
+            CapabilityRecord::observe(
+                cache,
+                cap,
+                state,
+                CapSource::Probe,
+                Some(c.status_code),
+                hint,
+            );
+        }
+    }
+    if refresh {
+        match client
+            .get_json::<Value>("/api/sn_sc/servicecatalog/items", &[("sysparm_limit", "1")])
+            .await
+        {
+            Ok(_) => CapabilityRecord::observe(
+                cache,
+                Capability::CatalogApi,
+                CapState::Available,
+                CapSource::Probe,
+                Some(200),
+                None,
+            ),
+            // ApiFamilyUnauthorized is recorded by the client itself.
+            Err(SncfrError::ApiFamilyUnauthorized { .. }) => {}
+            Err(SncfrError::NotFound { .. }) => CapabilityRecord::observe(
+                cache,
+                Capability::CatalogApi,
+                CapState::Unavailable,
+                CapSource::Probe,
+                Some(404),
+                None,
+            ),
+            Err(SncfrError::AclForbidden { .. }) => CapabilityRecord::observe(
+                cache,
+                Capability::CatalogApi,
+                CapState::Unauthorized,
+                CapSource::Probe,
+                Some(403),
+                Some(CapHint::Acl),
+            ),
+            Err(e @ (SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. })) => {
+                return Err(e);
+            }
+            Err(_) => {}
+        }
+    }
+    let capability_record = CapabilityRecord::load(cache).statuses(pack);
+
+    // Pack drift: authoritative user choice sets vs readable instance metadata.
+    let mut pack_drift = Vec::new();
+    for (key, set) in &pack.choices {
+        if set.origin == crate::pack::PackOrigin::Ootb || set.value.confirm_required {
+            continue;
+        }
+        let Some((table, field)) = key.split_once('.') else {
+            continue;
+        };
+        let Ok(schema) =
+            crate::schema::load_or_sync_table_schema(client, cache, table, false).await
+        else {
+            continue;
+        };
+        let Some(instance) = schema.choices.get(field).filter(|c| !c.is_empty()) else {
+            continue;
+        };
+        for entry in &set.value.values {
+            match instance.iter().find(|c| c.value == entry.value) {
+                None => pack_drift.push(format!(
+                    "{key}: value {} (\"{}\") is not on the instance",
+                    entry.value, entry.label
+                )),
+                Some(c) if c.label != entry.label => pack_drift.push(format!(
+                    "{key}: value {} is \"{}\" in the pack but \"{}\" on the instance{}",
+                    entry.value,
+                    entry.label,
+                    c.label,
+                    if set.value.workaround {
+                        " (workaround)"
+                    } else {
+                        ""
+                    }
+                )),
+                Some(_) => {}
+            }
+        }
+    }
+
     let task_accessible = capabilities
         .iter()
         .find(|c| c.resource == "table:task")
@@ -177,7 +326,10 @@ pub async fn execute_doctor(
         read_only_reason: profile.read_only_lock_reason.clone(),
         identity,
         capabilities,
-        pack: crate::pack::active().summary(),
+        pack: pack.summary(),
+        capability_record,
+        pack_binds_instance: pack.binds(&profile.instance_key),
+        pack_drift,
     })
 }
 
@@ -234,10 +386,29 @@ pub fn format_doctor_report(report: &DoctorReport, format: ResolvedOutputFormat)
                 "- **Instance Pack**: {}\n",
                 report.pack.headline()
             ));
+            if !report.pack_binds_instance {
+                out.push_str("  - ⚠ this pack does not list this instance in `instances`: writes are refused\n");
+            }
             for w in &report.pack.workarounds {
                 out.push_str(&format!("  - workaround: {w}\n"));
             }
+            for d in &report.pack_drift {
+                out.push_str(&format!("  - drift: {}\n", crate::untrusted::inline(d)));
+            }
             out.push('\n');
+            if !report.capability_record.is_empty() {
+                out.push_str("## Capability Record\n\n| Capability | State | Source | Age |\n| :--- | :--- | :--- | :--- |\n");
+                for c in &report.capability_record {
+                    out.push_str(&format!(
+                        "| `{}` | {} | {} | {} |\n",
+                        c.capability,
+                        c.state.as_str(),
+                        c.source,
+                        c.age_secs.map_or("—".to_string(), |a| format!("{a}s"))
+                    ));
+                }
+                out.push('\n');
+            }
             out.push_str("## ACL & Endpoint Capability Matrix\n\n");
             out.push_str("| Resource | Status | Accessible | Notes |\n");
             out.push_str("| :--- | :--- | :--- | :--- |\n");
@@ -274,8 +445,25 @@ pub fn format_doctor_report(report: &DoctorReport, format: ResolvedOutputFormat)
                 }
             ));
             out.push_str(&format!("Instance Pack:   {}\n", report.pack.headline()));
+            if !report.pack_binds_instance {
+                out.push_str("  ⚠ pack does not list this instance: writes are refused\n");
+            }
             for w in &report.pack.workarounds {
                 out.push_str(&format!("  workaround:    {w}\n"));
+            }
+            for d in &report.pack_drift {
+                out.push_str(&format!(
+                    "  drift:         {}\n",
+                    crate::untrusted::clean(d)
+                ));
+            }
+            let caps: Vec<String> = report
+                .capability_record
+                .iter()
+                .map(|c| format!("{}={}", c.capability, c.state.as_str()))
+                .collect();
+            if !caps.is_empty() {
+                out.push_str(&format!("Capabilities:    {}\n", caps.join(", ")));
             }
             out.push_str(&format!(
                 "Safety Gate:     {}\n\n",

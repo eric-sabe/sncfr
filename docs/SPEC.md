@@ -178,7 +178,13 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 - **`sncfr schema <table|prefix> [--choices [field]] [--sync]`** — Inspect table fields, mandatory status, and valid `sys_choice` options; manage local metadata cache.
 - **`sncfr table <table_name> [list-flags]`** — Read-only escape hatch for querying arbitrary non-ticket tables (`sys_user`, `sys_user_group`, `cmdb_ci`, `kb_knowledge`, etc.) that the user has ACL permission to read.
 - **`sncfr skill <print|install>`** — Generates or installs an instance-aware `SKILL.md` for AI agents (including the user's configured saved views, discovered custom ticket prefixes, and safety rules).
-- **`sncfr doctor`** — Runs connectivity, TLS, authentication, and ACL capability diagnostics, and reports the merged Instance Pack (name, version, status, hash, active workarounds). `sncfr auth status` also reports the pack.
+- **`sncfr doctor [--refresh]`** — Runs connectivity, TLS, authentication, and ACL capability diagnostics; probes the pack's `core.probe_tables` plus `doctor.extra_probe_tables`; and reports:
+  - the merged Instance Pack (name, version, status, hash, active workarounds);
+  - whether the pack lists this instance;
+  - **pack drift** (user-pack choice entries that readable `sys_choice` contradicts);
+  - the **capability record** (§7.2).
+
+  Probes are recorded as observations. Tables in `doctor.absent_tables_ok` that return 400/404 are reported as `not installed`, not as problems. `--refresh` forgets the record first and also probes the catalog API. `sncfr auth status` also reports the pack.
 - **`sncfr pack validate <path>`** — Strictly parses and semantically validates one pack file (§7.3). It reports every problem as `<file>:<line>:<col>: <key>: <message>` and exits `2` (`PACK_INVALID`) on errors; warnings (draft status, complete-choice-set notices) still exit `0`. It runs without authentication, even when the profile's own pack is broken.
 - **`sncfr pack show [--toml]`** — Prints the merged pack (`ootb` ⊕ profile pack ⊕ `--pack`): a summary with per-entry origin (`ootb`/`profile`/`override`), safety keys, and hash; `--json`/`-o yaml` for the full structure; `--toml` for a re-loadable single pack file.
 
