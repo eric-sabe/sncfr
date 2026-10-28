@@ -80,8 +80,17 @@ When a mutating command (`comment`, `note`, `update`, `create`, `attach`, `appro
 3. Outputs a structured **Dry-Run Preview**:
    - Target ticket number, table, `sys_id`, and URL.
    - Before $\to$ After field diff (showing both human display values and underlying internal values).
+   - For every field, a **Source** (`pack`, `ootb`, `cache`, `sys_choice`, `discovered`, `input`, or `none`) and a **Status** (`verified`, `verified (in-use set)`, `UNVERIFIABLE (<reason>)`, or `n/a (free text)`). JSON carries the same as `diffs[].source` / `diffs[].status`, plus `diffs[].unverifiable` (`would_send`, `reason`, `candidates`, `suggested`).
    - Exact command with `--write` to commit the change.
 4. Exits cleanly without mutating the instance.
+
+**Value resolution (SAFE-1)**: every field is first typed (choice, reference, free text, plain, unknown type, or unknown field). Choice values then go through this chain:
+1. an authoritative user-pack choice set (complete: a non-match is exit `2`; a contradiction with readable instance metadata is `pack_conflict`; values from a `draft` pack are `draft_pack`);
+2. the instance's complete set (cached or live `sys_choice`), where `confirm_required` aliases (the bundled `ootb` ones) apply only when the instance has the same `(value, label)`;
+3. an in-use set discovered via the Aggregate API;
+4. nothing, which gives `UNVERIFIABLE (no_metadata)`.
+
+Fields whose type or existence cannot be established are `UNVERIFIABLE`, never treated as free text. When `sys_dictionary` is forbidden or returns no rows, fields are inferred from one sample record. Full rules and the normative outcome table: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md) §Field typing and value resolution.
 
 ---
 

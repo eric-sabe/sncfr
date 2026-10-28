@@ -118,6 +118,8 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 |---|---|---|
 | A filter or lookup value contains `^`, a line break, or `javascript:` (e.g. `--group "x^ORname=y"`) | interpolated into the query | exit `2` `INVALID_QUERY_VALUE`, nothing sent (`--query` is still sent as written) |
 | Untrusted text in a dry-run preview | printed as-is | control characters and terminal escapes removed; Markdown cells escaped |
+| `--priority low` on an OOTB, readable instance | exit `2` (no label "low") | exit `0`, value `4`, source `ootb` (alias confirmed by the instance) |
+| A choice value or `--set` field that can't be checked (no readable choices, unknown field, unknown type) | sent as typed | shown as `UNVERIFIABLE (<reason>)` in the preview |
 
 ---
 

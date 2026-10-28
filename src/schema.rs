@@ -30,7 +30,8 @@ pub async fn load_or_sync_table_schema(
             ),
         });
     }
-    if !force_sync && let Ok(Some(cached)) = cache.read_table_schema(&table) {
+    if !force_sync && let Ok(Some(mut cached)) = cache.read_table_schema(&table) {
+        cached.loaded_from_cache = true;
         return Ok(cached);
     }
 
@@ -102,34 +103,51 @@ pub async fn load_or_sync_table_schema(
         Err(SncfrError::AuthRequired { profile }) => {
             return Err(SncfrError::AuthRequired { profile });
         }
-        Err(_) => {
-            // Graceful fallback when `sys_dictionary` is 403 Forbidden: infer fields from 1 sample row
-            let sample_path = format!("/api/now/table/{table}");
-            if let Ok(sample_resp) = client
-                .get_json::<Value>(
-                    &sample_path,
-                    &[("sysparm_limit", "1"), ("sysparm_display_value", "all")],
-                )
-                .await
-                && let Some(first) = sample_resp
-                    .get("result")
-                    .and_then(Value::as_array)
-                    .and_then(|a| a.first())
-                    .and_then(Value::as_object)
-            {
-                for k in first.keys() {
-                    fields.insert(
-                        k.clone(),
-                        CachedFieldMeta {
-                            label: k.clone(),
-                            internal_type: "inferred".to_string(),
-                            mandatory: false,
-                            max_length: None,
-                            reference_table: None,
-                            is_custom: k.starts_with("u_") || k.starts_with("x_"),
-                        },
-                    );
-                }
+        Err(_) => {}
+    }
+
+    // `sys_dictionary` 403 or zero visible rows (common for non-admins): infer fields from one
+    // sample record so they can at least be told apart from unknown names.
+    if fields.is_empty() && child_field_overrides.is_empty() {
+        let sample_path = format!("/api/now/table/{table}");
+        if let Ok(sample_resp) = client
+            .get_json::<Value>(
+                &sample_path,
+                &[("sysparm_limit", "1"), ("sysparm_display_value", "all")],
+            )
+            .await
+            && let Some(first) = sample_resp
+                .get("result")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(Value::as_object)
+        {
+            for (k, v) in first {
+                // Type hints from the sample's `display_value=all` shape: a `link` means a
+                // reference; a display value that differs from the stored value means a choice.
+                let value = v.get("value").and_then(Value::as_str).unwrap_or_default();
+                let display = v
+                    .get("display_value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let internal_type = if v.get("link").is_some() {
+                    "inferred_reference"
+                } else if !value.is_empty() && display != value {
+                    "inferred_choice"
+                } else {
+                    "inferred"
+                };
+                fields.insert(
+                    k.clone(),
+                    CachedFieldMeta {
+                        label: k.clone(),
+                        internal_type: internal_type.to_string(),
+                        mandatory: false,
+                        max_length: None,
+                        reference_table: None,
+                        is_custom: k.starts_with("u_") || k.starts_with("x_"),
+                    },
+                );
             }
         }
     }
@@ -200,52 +218,45 @@ pub async fn load_or_sync_table_schema(
         table,
         fields,
         choices,
+        loaded_from_cache: false,
     };
 
     let _ = cache.write_table_schema(&schema);
     Ok(schema)
 }
 
-/// Validates and resolves a human choice label or raw value (e.g., `"In Progress"` -> `("In Progress", "2")`)
-/// against [`CachedTableSchema`]. If the table has choices for `field` and `input` does not match any,
-/// returns [`SncfrError::ValidationError`] with all valid options.
+/// Resolves a choice label or raw value (e.g. `"In Progress"` -> `("In Progress", "2")`) for
+/// `field` through the fail-closed chain in [`crate::resolve_value`], using the active pack.
+/// Unlike 0.1.x, a value that cannot be confirmed is an error rather than passed through raw.
 pub fn resolve_choice_value(
     schema: &CachedTableSchema,
     field: &str,
     input: &str,
 ) -> Result<(String, String), SncfrError> {
-    let trimmed = input.trim();
-    let Some(options) = schema.choices.get(field) else {
-        return Ok((trimmed.to_string(), trimmed.to_string()));
+    let ctx = crate::resolve_value::ResolveCtx {
+        pack: crate::pack::active(),
+        table: &schema.table,
+        schema,
+        sample: None,
+        discovered: None,
     };
-    if options.is_empty() {
-        return Ok((trimmed.to_string(), trimmed.to_string()));
+    let resolved = crate::resolve_value::resolve_choice(&ctx, field, input)?;
+    match resolved.unverifiable() {
+        None => Ok((resolved.display(), resolved.value().to_string())),
+        Some(reason) => Err(SncfrError::Validation {
+            message: format!(
+                "Value '{}' for '{}.{field}' cannot be verified ({})",
+                input.trim(),
+                schema.table,
+                reason.as_str()
+            ),
+            valid_choices: Vec::new(),
+            remediation: Some(format!(
+                "Run `sncfr schema {} --choices {field}` to inspect valid choice options.",
+                schema.table
+            )),
+        }),
     }
-
-    // Match by exact value or case-insensitive label/value
-    if let Some(found) = options
-        .iter()
-        .find(|c| c.value.eq_ignore_ascii_case(trimmed) || c.label.eq_ignore_ascii_case(trimmed))
-    {
-        return Ok((found.label.clone(), found.value.clone()));
-    }
-
-    let valid_choices: Vec<String> = options
-        .iter()
-        .map(|c| format!("{} ({})", c.label, c.value))
-        .collect();
-
-    Err(SncfrError::Validation {
-        message: format!(
-            "Invalid choice value '{trimmed}' for field '{}.{}'",
-            schema.table, field
-        ),
-        valid_choices,
-        remediation: Some(format!(
-            "Run `sncfr schema {} --choices {field}` to inspect all valid choice options.",
-            schema.table
-        )),
-    })
 }
 
 /// Executes `sncfr schema <table|prefix> [--choices [field]] [--sync]`.

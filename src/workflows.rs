@@ -222,6 +222,7 @@ pub async fn execute_approval_action(
         before_value: Some(target.state.to_ascii_lowercase()),
         after_display: new_state_disp.to_string(),
         after_value: new_state_val.to_string(),
+        ..Default::default()
     }];
 
     let mut payload = Map::new();
@@ -236,6 +237,7 @@ pub async fn execute_approval_action(
             before_value: target.comments.clone(),
             after_display: comments.clone(),
             after_value: comments.clone(),
+            ..Default::default()
         });
         payload.insert("comments".to_string(), Value::String(comments.clone()));
     }
@@ -535,6 +537,7 @@ pub async fn execute_catalog_order(
             before_value: None,
             after_display: v.clone(),
             after_value: v.clone(),
+            ..Default::default()
         });
         vars_map.insert(k, Value::String(v));
     }
@@ -572,6 +575,7 @@ pub async fn execute_catalog_order(
             before_value: None,
             after_display: disp,
             after_value: user_sys_id.clone(),
+            ..Default::default()
         });
         order_payload["sysparm_requested_for"] = Value::String(user_sys_id);
     }
