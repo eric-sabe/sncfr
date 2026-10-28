@@ -571,3 +571,22 @@ async fn list_reports_has_more_without_counting_and_a_total_only_on_request() {
     assert_eq!(counted.json()["total"], 42);
     assert_eq!(counted.json()["has_more"], true);
 }
+
+#[tokio::test]
+async fn journal_queries_carry_the_table_name_for_the_index() {
+    // CT-29 (PERF-3)
+    let corp = ExampleCorp::start().await;
+    assert_eq!(corp.run(&["--json", "show", "INC0012345"]).code, 0);
+    let queries = corp.queries_to("/api/now/table/sys_journal_field").await;
+    assert!(!queries.is_empty());
+    for q in queries {
+        let decoded: String = url::form_urlencoded::parse(q.as_bytes())
+            .find(|(k, _)| k == "sysparm_query")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        assert!(
+            decoded.starts_with("nameINincident,task^element_id="),
+            "{decoded}"
+        );
+    }
+}
