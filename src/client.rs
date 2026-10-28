@@ -138,6 +138,9 @@ pub struct ReadOnlyClient {
     auth: ClientAuth,
     /// Timeout, retry, and rate-limit rules (SAFE-9, PERF-6), shared by clones.
     policy: std::sync::Arc<crate::policy::RequestPolicy>,
+    /// This instance's cache, for recording capability observations the client makes itself
+    /// (CAP-4). `None` in tests that don't need it.
+    cache: Option<crate::cache::InstanceCache>,
 }
 
 /// A single read-only (`GET`) sub-request inside a `/api/now/batch` request.
@@ -368,7 +371,76 @@ impl ReadOnlyClient {
             http,
             auth,
             policy: crate::policy::current(),
+            cache: None,
         })
+    }
+
+    /// Attaches the instance cache so the client can record capability observations.
+    #[must_use]
+    pub fn with_cache(mut self, cache: crate::cache::InstanceCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// The API family of `path` when it is not the Table API (`sn_sc`, `sn_chg_rest`, ...).
+    fn api_family(path: &str) -> Option<&str> {
+        let rest = path.strip_prefix("/api/")?;
+        let family = rest.split('/').next()?;
+        (family != "now").then_some(family)
+    }
+
+    /// CAP-4: a 401 (or login page) from a non-Table API family is only an expired session if a
+    /// Table API probe sent *after* it also fails. A JSON 2xx probe means this account just isn't
+    /// authorized for that family (NA-6).
+    async fn classify_family_auth_failure(&self, path: &str, err: SncfrError) -> SncfrError {
+        let (SncfrError::AuthExpired { .. }, Some(family)) = (&err, Self::api_family(path)) else {
+            return err;
+        };
+        let probe_path = "/api/now/table/sys_user";
+        let probe: Result<serde_json::Value, SncfrError> = match self.endpoint_url(probe_path) {
+            Ok(url) => match self
+                .send(crate::policy::RequestKind::Read, probe_path, || {
+                    self.auth.apply(
+                        self.http
+                            .get(url.clone())
+                            .query(&[("sysparm_limit", "1"), ("sysparm_fields", "sys_id")]),
+                    )
+                })
+                .await
+            {
+                Ok(resp) => self.decode_json_response(resp, probe_path, true).await,
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        match probe {
+            Ok(_) => {
+                crate::debug_log!(
+                    "auth",
+                    "401 from /api/{family}/ but the Table API works: family unauthorized"
+                );
+                if family == "sn_sc"
+                    && let Some(cache) = &self.cache
+                {
+                    use crate::capabilities::{
+                        CapHint, CapSource, CapState, Capability, CapabilityRecord,
+                    };
+                    CapabilityRecord::observe(
+                        cache,
+                        Capability::CatalogApi,
+                        CapState::Unauthorized,
+                        CapSource::Probe,
+                        Some(401),
+                        Some(CapHint::Acl),
+                    );
+                }
+                SncfrError::ApiFamilyUnauthorized {
+                    family: family.to_string(),
+                    resource: path.to_string(),
+                }
+            }
+            Err(_) => err,
+        }
     }
 
     /// Replaces the request policy (tests use fast retry waits).
@@ -487,7 +559,10 @@ impl ReadOnlyClient {
             resp.status(),
             started.elapsed().as_millis()
         );
-        self.decode_json_response(resp, path, true).await
+        match self.decode_json_response(resp, path, true).await {
+            Err(err) => Err(self.classify_family_auth_failure(path, err).await),
+            ok => ok,
+        }
     }
 
     /// Performs an authenticated `GET` request and returns the raw response bytes (e.g., for attachment downloads).
@@ -953,7 +1028,10 @@ impl MutatingClient {
                     .apply(ro.http.post(url.clone()).query(query).json(body))
             })
             .await?;
-        self.read_only.decode_json_response(resp, path, false).await
+        match self.read_only.decode_json_response(resp, path, false).await {
+            Err(err) => Err(self.read_only.classify_family_auth_failure(path, err).await),
+            ok => ok,
+        }
     }
 
     /// Sends an authenticated `PATCH` request with a JSON payload (e.g., updating ticket fields, comments, or work notes).
@@ -1519,5 +1597,96 @@ mod tests {
         assert_eq!(err.code().as_str(), "WRITE_OUTCOME_UNKNOWN");
         assert_eq!(err.code().exit_code(), 7);
         assert_eq!(count(&server, "PATCH").await, 1);
+    }
+
+    async fn family_server(probe: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/sn_sc/servicecatalog/items"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_user"))
+            .respond_with(probe)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_family_401_with_a_working_table_api_is_unauthorized_not_expired() {
+        // CT-22a (CAP-4)
+        let server = family_server(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "result": [] })),
+        )
+        .await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = crate::cache::InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        let err = policy_client(&server, 1000)
+            .with_cache(cache.clone())
+            .get_json::<serde_json::Value>("/api/sn_sc/servicecatalog/items", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().as_str(), "ACL_FORBIDDEN", "{err}");
+        assert!(matches!(err, SncfrError::ApiFamilyUnauthorized { .. }));
+        let rec = crate::capabilities::CapabilityRecord::load(&cache);
+        let obs = &rec.observations[&crate::capabilities::Capability::CatalogApi];
+        assert_eq!(obs.state, crate::capabilities::CapState::Unauthorized);
+        assert_eq!(obs.source, crate::capabilities::CapSource::Probe);
+    }
+
+    #[tokio::test]
+    async fn a_family_401_with_a_failing_probe_is_a_real_expiry() {
+        // CT-23, CT-23c (NA-6): 401 probe, and a 200 HTML login page.
+        for probe in [
+            ResponseTemplate::new(401),
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html")
+                .set_body_string("<html>login</html>"),
+        ] {
+            let server = family_server(probe).await;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cache = crate::cache::InstanceCache::with_instance_dir(dir.path().to_path_buf());
+            let err = policy_client(&server, 1000)
+                .with_cache(cache.clone())
+                .get_json::<serde_json::Value>("/api/sn_sc/servicecatalog/items", &[])
+                .await
+                .unwrap_err();
+            assert_eq!(err.code().exit_code(), 3, "{err}");
+            assert!(
+                crate::capabilities::CapabilityRecord::load(&cache)
+                    .observations
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_earlier_table_api_success_never_masks_a_later_expiry() {
+        // CT-23b (NA-6): the probe is always fresh, never a remembered flag.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_user"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "result": [] })),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let client = policy_client(&server, 1000);
+        let _: serde_json::Value = client
+            .get_json("/api/now/table/sys_user", &[])
+            .await
+            .expect("t0 table call works");
+        let err = client
+            .get_json::<serde_json::Value>("/api/sn_sc/servicecatalog/items", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().exit_code(), 3);
     }
 }

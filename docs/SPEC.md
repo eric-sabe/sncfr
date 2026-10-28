@@ -51,6 +51,7 @@ ServiceNow's official CLI offerings fail the everyday user and AI agent use case
 
 ### 3.2 Session Expiry & Re-Authentication
 
+- **Per-API-family 401s (CAP-4)**: a `401` (or login page) from a non-Table API family (`/api/sn_sc/*`, `/api/sn_chg_rest/*`) triggers one fresh Table API probe (`GET /api/now/table/sys_user?sysparm_limit=1`) sent after that 401. If the probe returns JSON 2xx, the account just isn't authorized for that family: exit `4` `ACL_FORBIDDEN` (`ApiFamilyUnauthorized`), with no re-auth prompt, and `catalog_api = unauthorized` recorded for `sn_sc`. A probe 401, redirect, or HTML login page is a real expiry and handled as below. The probe is never cached, so a session that expires mid-run is never masked.
 - When an API call returns `401 Unauthorized` or an invalid session redirect:
   - **Interactive TTY (`stdin` and `stdout` are TTYs)**: Automatically launches the isolated SSO `--app` window (which often completes hands-free via persisted IdP cookies in the isolated profile) and retries the original command.
   - **Non-Interactive / Agent Mode (`!isatty` or `--no-interactive`)**: Fails fast with exit code `3` (`AUTH_EXPIRED`) and outputs a structured error instructing the caller to run `sncfr auth login`.
