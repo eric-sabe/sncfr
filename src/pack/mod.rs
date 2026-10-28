@@ -4,8 +4,9 @@ pub mod merged;
 pub mod schema;
 
 use crate::error::SncfrError;
-pub use merged::{MergedPack, PackOrigin, Sourced};
+pub use merged::{MergedPack, PackOrigin, SafetyKeys, Sourced, Workaround};
 use schema::{PackFile, SUPPORTED_SCHEMA_VERSION};
+use std::path::Path;
 use std::sync::OnceLock;
 
 /// The bundled `ootb` pack: the single source of sncfr's built-in defaults (PACK-2).
@@ -23,6 +24,34 @@ pub fn ootb_file() -> PackFile {
 /// anything that runs before that (or in unit tests) sees the `ootb` pack alone.
 pub fn active() -> &'static MergedPack {
     ACTIVE.get_or_init(|| MergedPack::from_layers(&[(PackOrigin::Ootb, &ootb_file(), None)]))
+}
+
+/// Reads and parses one pack file, mapping any problem to `PACK_INVALID` (exit 2).
+pub fn read_pack_file(path: &Path) -> Result<PackFile, SncfrError> {
+    let source = path.display().to_string();
+    let text = std::fs::read_to_string(path).map_err(|e| SncfrError::InvalidArgs {
+        message: format!("Cannot read Instance Pack '{source}': {e}"),
+        remediation: Some(
+            "Check the `pack = \"…\"` path in config.toml, `--pack`, or `SNCFR_PACK`.".to_string(),
+        ),
+    })?;
+    parse_pack(&text).map_err(|problems| invalid(&source, &problems))
+}
+
+/// Loads `ootb` ⊕ profile pack ⊕ override pack (ADR-0004).
+pub fn load_layers(profile: Option<&Path>, over: Option<&Path>) -> Result<MergedPack, SncfrError> {
+    let ootb = ootb_file();
+    let profile_file = profile.map(read_pack_file).transpose()?;
+    let override_file = over.map(read_pack_file).transpose()?;
+    let mut layers: Vec<(PackOrigin, &PackFile, Option<String>)> =
+        vec![(PackOrigin::Ootb, &ootb, None)];
+    if let (Some(f), Some(p)) = (&profile_file, profile) {
+        layers.push((PackOrigin::Profile, f, Some(p.display().to_string())));
+    }
+    if let (Some(f), Some(p)) = (&override_file, over) {
+        layers.push((PackOrigin::Override, f, Some(p.display().to_string())));
+    }
+    Ok(MergedPack::from_layers(&layers))
 }
 
 /// Installs the merged pack for this process. Returns `false` if one was already installed.
@@ -193,6 +222,132 @@ mod tests {
         );
         assert_eq!(pack.resolve_table_shorthand("u_custom"), "u_custom");
         assert_eq!(pack.resolve_table_shorthand("Incident"), "incident");
+    }
+
+    /// Golden hash of the bundled ootb pack (CT-01). Update deliberately when `ootb.pack.toml`
+    /// or the merged representation changes.
+    const OOTB_HASH: &str =
+        "sha256:df423a1c083c145d7e5e3564f893fdb022d332bb5e905e6d80f65bb2598c08be";
+
+    fn merged(layers: &[(PackOrigin, &str)]) -> MergedPack {
+        let ootb = ootb_file();
+        let files: Vec<PackFile> = layers
+            .iter()
+            .map(|(_, t)| parse_pack(t).expect("parse layer"))
+            .collect();
+        let mut all = vec![(PackOrigin::Ootb, &ootb, None)];
+        for ((origin, _), f) in layers.iter().zip(&files) {
+            all.push((*origin, f, None));
+        }
+        MergedPack::from_layers(&all)
+    }
+
+    #[test]
+    fn ootb_hash_is_golden_and_deterministic() {
+        let a = merged(&[]);
+        assert_eq!(a.hash, OOTB_HASH);
+        assert_eq!(merged(&[]).hash, a.hash);
+        assert_eq!(a.short_hash().len(), "sha256:".len() + 12);
+        assert!(a.binds("anything.example"));
+    }
+
+    #[test]
+    fn user_layer_overrides_and_removes_keys() {
+        // CT-02
+        let user = format!(
+            "{MINIMAL}instances = [\"example.service-now.com\"]\n[prefixes]\nabc = \"u_abc_request\"\n[remove]\nprefixes = [\"CS\"]\n"
+        );
+        let m = merged(&[(PackOrigin::Profile, &user)]);
+        let map = m.prefix_map();
+        assert_eq!(map["ABC"], "u_abc_request");
+        assert_eq!(m.prefixes["ABC"].origin, PackOrigin::Profile);
+        assert_eq!(m.prefixes["INC"].origin, PackOrigin::Ootb);
+        assert!(!map.contains_key("CS"));
+        assert_ne!(m.hash, OOTB_HASH);
+        assert_eq!(m.name, "t");
+        assert_eq!(m.layers.len(), 2);
+    }
+
+    #[test]
+    fn user_choice_set_replaces_ootb_set_whole() {
+        let user = format!(
+            "{MINIMAL}[choices.task.priority]\nvalues = [{{ value = \"5\", label = \"5 - Low\", aliases = [\"low\"] }}]\n"
+        );
+        let m = merged(&[(PackOrigin::Profile, &user)]);
+        let set = &m.choices["task.priority"];
+        assert_eq!(set.origin, PackOrigin::Profile);
+        assert_eq!(set.value.values.len(), 1);
+        assert!(!set.value.confirm_required);
+    }
+
+    #[test]
+    fn safety_keys_are_a_strictest_union_across_layers() {
+        // CT-38b, CT-63b and NA-4.
+        let profile = format!(
+            "{MINIMAL}instances = [\"a.example\"]\n[auth]\nallow_credentials_file = false\n[audit]\nagent_write_marker = \"[agent]\"\n[limits]\nmax_requests_per_minute = 60\n"
+        );
+        let over = format!(
+            "{MINIMAL}instances = [\"a.example\", \"b.example\"]\n[auth]\nallow_credentials_file = true\n[audit]\nagent_write_marker = \"[other]\"\n[limits]\nmax_requests_per_minute = 600\n"
+        );
+        let m = merged(&[
+            (PackOrigin::Profile, &profile),
+            (PackOrigin::Override, &over),
+        ]);
+        assert!(!m.safety.allow_credentials_file);
+        assert_eq!(m.safety.agent_write_marker.as_deref(), Some("[agent]"));
+        assert_eq!(m.safety.max_requests_per_minute, Some(60));
+        assert!(m.binds("a.example"));
+        assert!(!m.binds("b.example"), "an override cannot widen instances");
+
+        let bare_override = MINIMAL.to_string();
+        let m = merged(&[
+            (PackOrigin::Profile, &profile),
+            (PackOrigin::Override, &bare_override),
+        ]);
+        assert_eq!(m.safety.agent_write_marker.as_deref(), Some("[agent]"));
+        assert!(!m.safety.allow_credentials_file);
+    }
+
+    #[test]
+    fn user_layers_cannot_set_known_free_text() {
+        let user = format!("{MINIMAL}[core]\nknown_free_text = [\"priority\"]\n");
+        let m = merged(&[(PackOrigin::Profile, &user)]);
+        assert!(!m.core.known_free_text.iter().any(|f| f == "priority"));
+        assert!(
+            m.core
+                .known_free_text
+                .iter()
+                .any(|f| f == "short_description")
+        );
+    }
+
+    #[test]
+    fn lists_workarounds_with_defect_refs() {
+        let user = format!(
+            "{MINIMAL}[open_rule.incident]\nquery = \"active=true^stateNOT IN6,7\"\nworkaround = true\ndefect_ref = \"resolved stays active\"\n"
+        );
+        let w = merged(&[(PackOrigin::Profile, &user)]).workarounds();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].key, "open_rule.incident");
+        assert_eq!(w[0].defect_ref.as_deref(), Some("resolved stays active"));
+    }
+
+    #[test]
+    fn load_layers_reports_unreadable_and_invalid_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.toml");
+        assert_eq!(
+            load_layers(Some(&missing), None)
+                .unwrap_err()
+                .code()
+                .exit_code(),
+            2
+        );
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, format!("{MINIMAL}nope = 1\n")).expect("write");
+        let err = load_layers(Some(&bad), None).unwrap_err();
+        assert_eq!(err.code().as_str(), "PACK_INVALID");
+        assert!(err.to_string().contains("bad.toml:4:"), "{err}");
     }
 
     #[test]
