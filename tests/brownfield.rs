@@ -684,3 +684,117 @@ async fn list_group_filters_expand_through_the_suffix_convention() {
         "{q}"
     );
 }
+
+#[tokio::test]
+async fn in_use_values_verify_what_they_can_and_never_prove_absence() {
+    // CT-08, CT-08c (rows 5, 8; DISC-2, DISC-3)
+    let corp = ExampleCorp::start_without_pack().await;
+    corp.mount(support::Scenario::InUseRenumbered).await;
+    let first = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--priority",
+        "low",
+        "--write",
+    ]);
+    assert_eq!(first.code, 8, "{}", first.stderr);
+    let f = &first.json()["unverifiable_fields"][0];
+    assert_eq!(f["reason"], "ootb_unconfirmed");
+    assert_eq!(f["would_send"], "low");
+    assert_eq!(f["suggested"], "5");
+    let stats = corp.queries_to("/api/now/stats/incident").await.len();
+    assert_eq!(stats, 1);
+    let cached = std::fs::read_to_string(corp.cache_file("discovered/incident.json"))
+        .expect("discovered cache");
+    assert!(cached.contains("\"complete\": false"), "{cached}");
+
+    let again = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--priority",
+        "low",
+        "--write",
+    ]);
+    assert_eq!(again.code, 8, "{}", again.stderr);
+    assert_eq!(again.json()["unverifiable_fields"][0], *f);
+    assert_eq!(
+        corp.queries_to("/api/now/stats/incident").await.len(),
+        stats,
+        "a re-run inside the TTL sends no stats request"
+    );
+
+    let five = corp.run(&["--json", "update", "INC0012345", "--priority", "5 - Low"]);
+    assert_eq!(five.code, 0, "{}", five.stderr);
+    assert_eq!(five.json()["diffs"][0]["source"], "discovered");
+    assert_eq!(five.json()["diffs"][0]["status"], "verified (in-use set)");
+    assert!(corp.mutating_requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn an_in_use_set_confirms_an_ootb_alias() {
+    // CT-08b (row 6)
+    let corp = ExampleCorp::start_without_pack().await;
+    corp.mount(support::Scenario::InUseOotbLow).await;
+    let out = corp.run(&["--json", "update", "INC0012345", "--priority", "low"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let diff = &out.json()["diffs"][0];
+    assert_eq!(diff["after_value"], "4");
+    assert_eq!(diff["source"], "ootb");
+}
+
+#[tokio::test]
+async fn unauthorized_stats_leave_no_metadata_and_are_remembered() {
+    // CT-08d (row 7)
+    let corp = ExampleCorp::start_without_pack().await;
+    corp.mount(support::Scenario::StatsUnauthorized).await;
+    let out = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--priority",
+        "low",
+        "--write",
+    ]);
+    assert_eq!(out.code, 8, "{}", out.stderr);
+    assert_eq!(
+        out.json()["unverifiable_fields"][0]["reason"],
+        "no_metadata"
+    );
+    let caps = std::fs::read_to_string(corp.cache_file("capabilities.json")).expect("caps");
+    assert!(caps.contains("stats_group_by"), "{caps}");
+    let again = corp.run(&["--json", "update", "INC0012345", "--priority", "low"]);
+    assert_eq!(again.code, 8);
+    assert_eq!(corp.queries_to("/api/now/stats/incident").await.len(), 1);
+    assert!(corp.mutating_requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_value_not_in_the_in_use_set_is_not_seen_and_blocks_the_write() {
+    // CT-10b
+    let pack = support::EXAMPLE_PACK.replace(
+        "choice_fields = { incident = [\"priority\", \"state\"]",
+        "choice_fields = { incident = [\"priority\", \"state\", \"u_tier\"]",
+    );
+    let corp = ExampleCorp::start_with_pack(&pack).await;
+    corp.mount(support::Scenario::InUseRenumbered).await;
+    corp.mount_incident_patch(serde_json::json!({})).await;
+    let out = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--set",
+        "u_tier=gold",
+        "--write",
+    ]);
+    assert_eq!(out.code, 8, "{}", out.stderr);
+    let f = &out.json()["unverifiable_fields"][0];
+    assert_eq!(f["reason"], "not_seen");
+    let candidates = f["candidates"].to_string();
+    assert!(
+        candidates.contains("silver") && candidates.contains("bronze"),
+        "{candidates}"
+    );
+    assert!(corp.patch_bodies().await.is_empty(), "zero PATCH");
+}
