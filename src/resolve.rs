@@ -5,26 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Built-in default ServiceNow ticket prefixes (`docs/SPEC.md` Section 7.2).
+/// Ticket prefixes known from the merged Instance Pack (the bundled `ootb` pack plus any user
+/// layers; `docs/SPEC.md` Section 7.2).
 pub fn builtin_prefixes() -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    for (prefix, table) in [
-        ("INC", "incident"),
-        ("CHG", "change_request"),
-        ("RITM", "sc_req_item"),
-        ("REQ", "sc_request"),
-        ("SCTASK", "sc_task"),
-        ("TASK", "task"),
-        ("PRB", "problem"),
-        ("PTASK", "problem_task"),
-        ("CTASK", "change_task"),
-        ("CS", "sn_customerservice_case"),
-        ("KB", "kb_knowledge"),
-        ("HR", "sn_hr_core_case"),
-    ] {
-        map.insert(prefix.to_string(), table.to_string());
-    }
-    map
+    crate::pack::active().prefix_map()
 }
 
 /// Splits a ticket number like `"inc0010042"` into `Some(("INC", "INC0010042"))`.

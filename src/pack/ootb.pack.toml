@@ -1,0 +1,116 @@
+# The bundled `ootb` Instance Pack (ADR-0004, PACK-2).
+#
+# Every built-in default sncfr uses lives here; there are no parallel constants in code.
+# User packs layer over this file. With no user pack, a readable out-of-the-box instance
+# behaves exactly as sncfr 0.1.x did.
+schema_version = 1
+pack_version = "0.2.0"
+name = "ootb"
+
+[core]
+# Doctor probes these tables (`table:<name>`), in order.
+probe_tables = [
+  "task",
+  "incident",
+  "sc_req_item",
+  "change_request",
+  "sys_journal_field",
+  "sys_number",
+  "sys_choice",
+  "sys_dictionary",
+]
+# Default `list` columns for ticket (task-derived) tables.
+list_columns = [
+  "number",
+  "sys_class_name",
+  "state",
+  "priority",
+  "short_description",
+  "assigned_to",
+  "assignment_group",
+  "sys_updated_on",
+]
+# Curated `show` dossier fields (non-empty u_*/x_* custom fields are always added).
+dossier_core_fields = [
+  "number", "sys_class_name", "state", "incident_state", "stage", "approval",
+  "priority", "urgency", "impact", "severity", "category", "subcategory",
+  "short_description", "description", "caller_id", "requested_for", "opened_by",
+  "assignment_group", "assigned_to", "cmdb_ci", "business_service", "parent",
+  "request", "request_item", "problem_id", "rfc", "sys_created_on", "sys_updated_on",
+  "resolved_at", "closed_at", "close_code", "close_notes", "work_start", "work_end",
+  "start_date", "end_date", "justification", "implementation_plan", "backout_plan",
+  "test_plan", "watch_list",
+]
+# Fields `feed` fetches per updated record.
+feed_fields = [
+  "sys_id", "number", "sys_class_name", "state", "priority", "short_description",
+  "assigned_to", "sys_updated_on", "sys_updated_by", "comments_and_work_notes", "comments",
+]
+# Which field holds the "caller" for each table; tables not listed use `opened_by`.
+caller_fields = { incident = "caller_id", sc_req_item = "requested_for", sc_request = "requested_for" }
+# Fields that are always free text, so values are never UNVERIFIABLE. Only the ootb pack may set this.
+known_free_text = ["short_description", "description", "close_notes", "comments", "work_notes"]
+# Extra `--table` shorthands beyond the (case-insensitive) ticket prefixes below.
+table_aliases = { case = "sn_customerservice_case" }
+
+[prefixes]
+INC = "incident"
+CHG = "change_request"
+RITM = "sc_req_item"
+REQ = "sc_request"
+SCTASK = "sc_task"
+TASK = "task"
+PRB = "problem"
+PTASK = "problem_task"
+CTASK = "change_task"
+CS = "sn_customerservice_case"
+KB = "kb_knowledge"
+HR = "sn_hr_core_case"
+
+[hierarchy]
+incident = "task"
+problem = "task"
+problem_task = "task"
+change_request = "task"
+change_task = "task"
+sc_request = "task"
+sc_req_item = "task"
+sc_task = "task"
+sn_customerservice_case = "task"
+sn_hr_core_case = "task"
+
+[discovery]
+choice_fields = { task = ["state", "priority", "urgency", "impact", "close_code"] }
+
+# OOTB choice sets. `confirm_required = true`: an entry (and its aliases) applies only when the
+# instance's own metadata confirms the same (value, label). It never resolves a value on its own.
+[choices.task.priority]
+confirm_required = true
+values = [
+  { value = "1", label = "1 - Critical", aliases = ["p1", "critical"] },
+  { value = "2", label = "2 - High", aliases = ["p2", "high"] },
+  { value = "3", label = "3 - Moderate", aliases = ["p3", "moderate"] },
+  { value = "4", label = "4 - Low", aliases = ["p4", "low"] },
+  { value = "5", label = "5 - Planning", aliases = ["p5", "planning"] },
+]
+
+[choices.task.state]
+confirm_required = true
+values = [
+  { value = "1", label = "Open" },
+  { value = "2", label = "Work in Progress", aliases = ["wip", "in progress"] },
+  { value = "3", label = "Closed Complete" },
+  { value = "4", label = "Closed Incomplete" },
+  { value = "7", label = "Closed Skipped" },
+]
+
+[choices.incident.state]
+confirm_required = true
+values = [
+  { value = "1", label = "New" },
+  { value = "2", label = "In Progress", aliases = ["wip"] },
+  { value = "3", label = "On Hold", aliases = ["hold"] },
+  { value = "6", label = "Resolved" },
+  { value = "7", label = "Closed" },
+  { value = "8", label = "Canceled", aliases = ["cancelled"] },
+]

@@ -1,9 +1,34 @@
 //! Instance Packs (ADR-0004): declarative per-instance facts layered over the bundled `ootb` pack.
 
+pub mod merged;
 pub mod schema;
 
 use crate::error::SncfrError;
+pub use merged::{MergedPack, PackOrigin, Sourced};
 use schema::{PackFile, SUPPORTED_SCHEMA_VERSION};
+use std::sync::OnceLock;
+
+/// The bundled `ootb` pack: the single source of sncfr's built-in defaults (PACK-2).
+pub const OOTB_PACK_TOML: &str = include_str!("ootb.pack.toml");
+
+static ACTIVE: OnceLock<MergedPack> = OnceLock::new();
+
+/// The parsed bundled pack. It is compiled in and covered by tests, so failing to parse it is a
+/// build defect, not a runtime condition.
+pub fn ootb_file() -> PackFile {
+    parse_pack(OOTB_PACK_TOML).unwrap_or_else(|p| panic!("bundled ootb pack is invalid: {p:?}"))
+}
+
+/// The merged pack for this process. Installed once by `main` after loading the configured layers;
+/// anything that runs before that (or in unit tests) sees the `ootb` pack alone.
+pub fn active() -> &'static MergedPack {
+    ACTIVE.get_or_init(|| MergedPack::from_layers(&[(PackOrigin::Ootb, &ootb_file(), None)]))
+}
+
+/// Installs the merged pack for this process. Returns `false` if one was already installed.
+pub fn install(pack: MergedPack) -> bool {
+    ACTIVE.set(pack).is_ok()
+}
 
 /// A single located problem in a pack file, rendered as `<source>:<line>:<col>: <message>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +162,37 @@ mod tests {
         );
         let problems = parse_pack(&text).unwrap_err();
         assert!(problems[0].message.contains("update"), "{problems:?}");
+    }
+
+    #[test]
+    fn bundled_ootb_pack_parses_and_holds_the_former_constants() {
+        let pack = active();
+        assert_eq!(pack.name, "ootb");
+        assert_eq!(pack.prefix_map().len(), 12);
+        assert_eq!(pack.prefix_map()["RITM"], "sc_req_item");
+        assert_eq!(pack.core.list_columns.len(), 8);
+        assert_eq!(pack.core.dossier_core_fields.len(), 41);
+        assert_eq!(
+            pack.core.probe_tables.first().map(String::as_str),
+            Some("task")
+        );
+        assert_eq!(pack.caller_field("incident"), "caller_id");
+        assert_eq!(pack.caller_field("sc_request"), "requested_for");
+        assert_eq!(pack.caller_field("change_request"), "opened_by");
+        assert!(pack.choices["task.priority"].value.confirm_required);
+    }
+
+    #[test]
+    fn table_shorthand_uses_prefixes_and_aliases() {
+        let pack = active();
+        assert_eq!(pack.resolve_table_shorthand("inc"), "incident");
+        assert_eq!(pack.resolve_table_shorthand("RITM"), "sc_req_item");
+        assert_eq!(
+            pack.resolve_table_shorthand("case"),
+            "sn_customerservice_case"
+        );
+        assert_eq!(pack.resolve_table_shorthand("u_custom"), "u_custom");
+        assert_eq!(pack.resolve_table_shorthand("Incident"), "incident");
     }
 
     #[test]

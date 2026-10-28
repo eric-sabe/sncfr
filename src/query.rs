@@ -434,18 +434,7 @@ const fn from_hex(b: u8) -> Option<u8> {
 
 /// Resolves a table shorthand or prefix (`inc`, `ritm`, `chg`, `sctask`, `prb`, `req`, `cs`) to its canonical table name.
 pub fn resolve_table_shorthand(table_or_prefix: &str) -> String {
-    let lower = table_or_prefix.trim().to_lowercase();
-    match lower.as_str() {
-        "inc" => "incident".to_string(),
-        "chg" => "change_request".to_string(),
-        "ritm" => "sc_req_item".to_string(),
-        "req" => "sc_request".to_string(),
-        "sctask" => "sc_task".to_string(),
-        "prb" => "problem".to_string(),
-        "cs" | "case" => "sn_customerservice_case".to_string(),
-        "kb" => "kb_knowledge".to_string(),
-        _ => lower,
-    }
+    crate::pack::active().resolve_table_shorthand(table_or_prefix)
 }
 
 /// Compiles [`ListFilterArgs`], an optional [`SavedView`], and optional [`CachedIdentity`] into
@@ -487,10 +476,9 @@ pub fn compile_list_filters(
             .map(|id| format!("={}", id.sys_id))
             .unwrap_or_else(|| format!("DYNAMIC{DYNAMIC_ME_SYS_ID}"));
         let mut mine_clause = format!("assigned_to{me_val}^ORopened_by{me_val}");
-        if table == "incident" {
-            mine_clause.push_str(&format!("^ORcaller_id{me_val}"));
-        } else if table == "sc_req_item" || table == "sc_request" {
-            mine_clause.push_str(&format!("^ORrequested_for{me_val}"));
+        let caller_field = crate::pack::active().caller_field(&table);
+        if caller_field != "opened_by" && caller_field != "assigned_to" {
+            mine_clause.push_str(&format!("^OR{caller_field}{me_val}"));
         }
         eq.raw(&mine_clause);
     }

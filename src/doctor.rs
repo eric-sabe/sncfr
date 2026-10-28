@@ -30,53 +30,45 @@ pub struct DoctorReport {
     pub capabilities: Vec<CapabilityCheck>,
 }
 
-const PROBED_RESOURCES: &[(&str, &str, &str)] = &[
-    (
-        "table:task",
-        "/api/now/table/task?sysparm_limit=1&sysparm_fields=sys_id",
-        "Base task table (required for cross-table search & prefix fallback)",
-    ),
-    (
-        "table:incident",
-        "/api/now/table/incident?sysparm_limit=1&sysparm_fields=sys_id",
-        "Incident records (INC*)",
-    ),
-    (
-        "table:sc_req_item",
-        "/api/now/table/sc_req_item?sysparm_limit=1&sysparm_fields=sys_id",
-        "Requested Item records (RITM*)",
-    ),
-    (
-        "table:change_request",
-        "/api/now/table/change_request?sysparm_limit=1&sysparm_fields=sys_id",
-        "Change Request records (CHG*)",
-    ),
-    (
-        "table:sys_journal_field",
-        "/api/now/table/sys_journal_field?sysparm_limit=1&sysparm_fields=sys_id",
-        "403 Forbidden (sncfr will fall back to inline comments_and_work_notes)",
-    ),
-    (
-        "table:sys_number",
-        "/api/now/table/sys_number?sysparm_limit=1&sysparm_fields=sys_id",
-        "403 Forbidden (sncfr will use built-in ITIL prefixes + task fallback)",
-    ),
-    (
-        "table:sys_choice",
-        "/api/now/table/sys_choice?sysparm_limit=1&sysparm_fields=sys_id",
-        "403 Forbidden (choice label resolution will pass raw values)",
-    ),
-    (
-        "table:sys_dictionary",
-        "/api/now/table/sys_dictionary?sysparm_limit=1&sysparm_fields=sys_id",
-        "403 Forbidden (schema introspection will infer fields from records)",
-    ),
-    (
-        "api:stats",
-        "/api/now/stats/task?sysparm_count=true",
-        "Aggregate API (`sncfr stats`)",
-    ),
-];
+/// What sncfr does instead when a well-known probe table is forbidden.
+fn probe_fallback_note(table: &str) -> &'static str {
+    match table {
+        "task" => "Base task table (required for cross-table search & prefix fallback)",
+        "incident" => "Incident records (INC*)",
+        "sc_req_item" => "Requested Item records (RITM*)",
+        "change_request" => "Change Request records (CHG*)",
+        "sys_journal_field" => {
+            "403 Forbidden (sncfr will fall back to inline comments_and_work_notes)"
+        }
+        "sys_number" => "403 Forbidden (sncfr will use built-in ITIL prefixes + task fallback)",
+        "sys_choice" => "403 Forbidden (choice label resolution will pass raw values)",
+        "sys_dictionary" => "403 Forbidden (schema introspection will infer fields from records)",
+        _ => "403 Forbidden",
+    }
+}
+
+/// `(resource id, endpoint, 403 note)` for every probe: the pack's `core.probe_tables` (ADR-0004)
+/// plus the Aggregate API.
+fn probed_resources() -> Vec<(String, String, String)> {
+    let mut probes: Vec<(String, String, String)> = crate::pack::active()
+        .core
+        .probe_tables
+        .iter()
+        .map(|t| {
+            (
+                format!("table:{t}"),
+                format!("/api/now/table/{t}?sysparm_limit=1&sysparm_fields=sys_id"),
+                probe_fallback_note(t).to_string(),
+            )
+        })
+        .collect();
+    probes.push((
+        "api:stats".to_string(),
+        "/api/now/stats/task?sysparm_count=true".to_string(),
+        "Aggregate API (`sncfr stats`)".to_string(),
+    ));
+    probes
+}
 
 /// Executes `sncfr doctor`: verifies live authentication, resolves `@me` identity, and probes
 /// the user's non-admin ACL capability matrix across core ServiceNow tables and REST APIs.
@@ -87,12 +79,13 @@ pub async fn execute_doctor(
 ) -> Result<DoctorReport, SncfrError> {
     let identity = resolve_current_identity(client, cache, true).await?;
 
-    let sub_requests: Vec<BatchGetSubRequest> = PROBED_RESOURCES
+    let probes = probed_resources();
+    let sub_requests: Vec<BatchGetSubRequest> = probes
         .iter()
-        .map(|(res, url, _)| BatchGetSubRequest::new(*res, *url))
+        .map(|(res, url, _)| BatchGetSubRequest::new(res, url))
         .collect();
 
-    let mut capabilities = Vec::with_capacity(PROBED_RESOURCES.len() + 1);
+    let mut capabilities = Vec::with_capacity(probes.len() + 1);
 
     match client.batch_get("sncfr-doctor", &sub_requests).await {
         Ok(batch_resp) => {
@@ -104,19 +97,19 @@ pub async fn execute_doctor(
                 note: "Single-roundtrip Ticket Dossier enabled".to_string(),
             });
 
-            for (res_id, endpoint, fallback_note) in PROBED_RESOURCES {
+            for (res_id, endpoint, fallback_note) in &probes {
                 if let Some(sub) = batch_resp.get(res_id) {
                     let accessible = sub.is_success();
                     let note = if accessible {
                         "OK".to_string()
                     } else if sub.status_code == 403 {
-                        (*fallback_note).to_string()
+                        fallback_note.clone()
                     } else {
                         format!("HTTP {}", sub.status_code)
                     };
                     capabilities.push(CapabilityCheck {
-                        resource: (*res_id).to_string(),
-                        endpoint: (*endpoint).to_string(),
+                        resource: res_id.clone(),
+                        endpoint: endpoint.clone(),
                         status_code: sub.status_code,
                         accessible,
                         note,
@@ -141,13 +134,11 @@ pub async fn execute_doctor(
                 note: "Unavailable (sncfr will fall back to concurrent GET requests)".to_string(),
             });
 
-            for (res_id, endpoint, fallback_note) in PROBED_RESOURCES {
+            for (res_id, endpoint, fallback_note) in &probes {
                 let (status_code, accessible, note) =
                     match client.get_json::<Value>(endpoint, &[]).await {
                         Ok(_) => (200, true, "OK".to_string()),
-                        Err(SncfrError::AclForbidden { .. }) => {
-                            (403, false, (*fallback_note).to_string())
-                        }
+                        Err(SncfrError::AclForbidden { .. }) => (403, false, fallback_note.clone()),
                         Err(SncfrError::NotFound { .. }) => (404, false, "Not Found".to_string()),
                         Err(SncfrError::NetworkOrInstance { status, .. }) => {
                             let code = status.unwrap_or(500);
@@ -156,8 +147,8 @@ pub async fn execute_doctor(
                         Err(_) => (500, false, "Error".to_string()),
                     };
                 capabilities.push(CapabilityCheck {
-                    resource: (*res_id).to_string(),
-                    endpoint: (*endpoint).to_string(),
+                    resource: res_id.clone(),
+                    endpoint: endpoint.clone(),
                     status_code,
                     accessible,
                     note,
@@ -352,10 +343,10 @@ mod tests {
         // 3. Mock `/api/now/batch` with mixed 200 and 403 (`sys_journal_field` restricted)
         let ok_body = BASE64_STANDARD.encode(r#"{"result":[{"sys_id":"1"}]}"#);
         let forbidden_body = BASE64_STANDARD.encode(r#"{"error":{"message":"Access Denied"}}"#);
-        let serviced: Vec<Value> = PROBED_RESOURCES
+        let serviced: Vec<Value> = probed_resources()
             .iter()
             .map(|(res_id, _, _)| {
-                if *res_id == "table:sys_journal_field" {
+                if res_id == "table:sys_journal_field" {
                     json!({
                         "id": res_id,
                         "status_code": 403,
