@@ -5,7 +5,8 @@ use super::schema::{
     PackStatus, RecipeFile, RuleFile, TriageSection,
 };
 use serde::Serialize;
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Which layer an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -48,6 +49,42 @@ pub struct CoreDefaults {
     pub table_aliases: BTreeMap<String, String>,
 }
 
+/// Safety-relevant keys, merged as the strictest union of every layer (ADR-0004, NA-4): a later
+/// layer can never loosen what an earlier one set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SafetyKeys {
+    /// `false` if any layer sets `auth.allow_credentials_file = false`.
+    pub allow_credentials_file: bool,
+    /// The first layer that defines `audit.agent_write_marker` wins; later layers cannot remove it.
+    pub agent_write_marker: Option<String>,
+    /// The lowest `limits.max_requests_per_minute` of any layer.
+    pub max_requests_per_minute: Option<u32>,
+    /// Intersection of the `instances` of every user layer that declares any; `None` when no
+    /// user layer declares instances (e.g. ootb only).
+    pub instances: Option<BTreeSet<String>>,
+}
+
+impl Default for SafetyKeys {
+    fn default() -> Self {
+        Self {
+            allow_credentials_file: true,
+            agent_write_marker: None,
+            max_requests_per_minute: None,
+            instances: None,
+        }
+    }
+}
+
+/// A pack entry flagged `workaround = true` (PACK-7), listed by `doctor`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Workaround {
+    /// e.g. `choices.incident.priority` or `open_rule.incident`.
+    pub key: String,
+    pub origin: PackOrigin,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defect_ref: Option<String>,
+}
+
 /// One loaded layer, as reported by `pack show` / `doctor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LayerInfo {
@@ -81,6 +118,9 @@ pub struct MergedPack {
     pub triage: TriageSection,
     pub doctor_absent_tables_ok: Vec<String>,
     pub capabilities: CapabilitiesSeed,
+    pub safety: SafetyKeys,
+    /// `sha256:<hex>` over the canonical JSON of everything above (PACK-6).
+    pub hash: String,
 }
 
 impl MergedPack {
@@ -104,6 +144,8 @@ impl MergedPack {
             triage: TriageSection::default(),
             doctor_absent_tables_ok: Vec::new(),
             capabilities: CapabilitiesSeed::default(),
+            safety: SafetyKeys::default(),
+            hash: String::new(),
         }
     }
 
@@ -112,8 +154,117 @@ impl MergedPack {
         let mut merged = Self::empty();
         for (origin, file, path) in layers {
             merged.apply_layer(*origin, file, path.clone());
+            merged.apply_removals(file);
+            merged.apply_safety(*origin, file);
         }
+        merged.hash = merged.compute_hash();
         merged
+    }
+
+    /// `[remove]`: deletes map keys after the layer that declares it is merged (PACK-3).
+    fn apply_removals(&mut self, file: &PackFile) {
+        let Some(r) = &file.remove else { return };
+        for k in &r.prefixes {
+            self.prefixes.remove(&k.to_ascii_uppercase());
+        }
+        for k in &r.choices {
+            self.choices.remove(k);
+        }
+        for k in &r.open_rule {
+            self.open_rules.remove(k);
+        }
+        for k in &r.closed_rule {
+            self.closed_rules.remove(k);
+        }
+        for k in &r.fields_default {
+            self.fields_default.remove(k);
+        }
+        for k in &r.recipes {
+            self.recipes.remove(k);
+        }
+        self.core
+            .probe_tables
+            .retain(|t| !r.core_probe_tables.contains(t));
+    }
+
+    /// Folds one layer's safety keys in as a strictest union (NA-4).
+    fn apply_safety(&mut self, origin: PackOrigin, file: &PackFile) {
+        let s = &mut self.safety;
+        if file.auth.as_ref().and_then(|a| a.allow_credentials_file) == Some(false) {
+            s.allow_credentials_file = false;
+        }
+        if s.agent_write_marker.is_none() {
+            s.agent_write_marker = file
+                .audit
+                .as_ref()
+                .and_then(|a| a.agent_write_marker.clone());
+        }
+        if let Some(rpm) = file.limits.as_ref().and_then(|l| l.max_requests_per_minute) {
+            s.max_requests_per_minute =
+                Some(s.max_requests_per_minute.map_or(rpm, |cur| cur.min(rpm)));
+        }
+        if origin != PackOrigin::Ootb && !file.instances.is_empty() {
+            let declared: BTreeSet<String> = file
+                .instances
+                .iter()
+                .map(|h| h.trim().to_ascii_lowercase())
+                .collect();
+            s.instances = Some(match s.instances.take() {
+                Some(cur) => cur.intersection(&declared).cloned().collect(),
+                None => declared,
+            });
+        }
+    }
+
+    fn compute_hash(&self) -> String {
+        let mut view = self.clone();
+        view.hash = String::new();
+        let canonical = serde_json::to_vec(&view).unwrap_or_default();
+        let digest = Sha256::digest(&canonical);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256:{hex}")
+    }
+
+    /// `sha256:` plus the first 12 hex characters, for human output.
+    pub fn short_hash(&self) -> &str {
+        self.hash.get(..19).unwrap_or(&self.hash)
+    }
+
+    /// True when the merged pack applies to `instance_host` (always true without user `instances`).
+    pub fn binds(&self, instance_host: &str) -> bool {
+        self.safety
+            .instances
+            .as_ref()
+            .is_none_or(|set| set.contains(&instance_host.to_ascii_lowercase()))
+    }
+
+    /// Every entry flagged `workaround = true` (PACK-7).
+    pub fn workarounds(&self) -> Vec<Workaround> {
+        let mut out = Vec::new();
+        for (k, v) in &self.choices {
+            if v.value.workaround {
+                out.push(Workaround {
+                    key: format!("choices.{k}"),
+                    origin: v.origin,
+                    defect_ref: v.value.defect_ref.clone(),
+                });
+            }
+        }
+        for (section, rules) in [
+            ("open_rule", &self.open_rules),
+            ("closed_rule", &self.closed_rules),
+        ] {
+            for (k, v) in rules {
+                if v.value.workaround {
+                    out.push(Workaround {
+                        key: format!("{section}.{k}"),
+                        origin: v.origin,
+                        defect_ref: v.value.defect_ref.clone(),
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Key-level replace of one layer over the current state (PACK-3).
@@ -152,12 +303,17 @@ impl MergedPack {
                 (&core.list_columns, &mut c.list_columns),
                 (&core.dossier_core_fields, &mut c.dossier_core_fields),
                 (&core.feed_fields, &mut c.feed_fields),
-                (&core.known_free_text, &mut c.known_free_text),
             ];
             for (src, dst) in lists {
                 if let Some(v) = src {
                     dst.clone_from(v);
                 }
+            }
+            // Marking a field free text bypasses the write gate, so only ootb may (NA-4).
+            if origin == PackOrigin::Ootb
+                && let Some(v) = &core.known_free_text
+            {
+                c.known_free_text.clone_from(v);
             }
             if let Some(v) = &core.caller_fields {
                 c.caller_fields.extend(v.clone());
