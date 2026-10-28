@@ -3,5 +3,7 @@
   "Network - L2": [{ "sys_id": "33333333333333333333333333333333", "name": "Network - L2" }],
   "Network - L3": [{ "sys_id": "44444444444444444444444444444444", "name": "Network - L3" }],
   "Storage - L2": [{ "sys_id": "55555555555555555555555555555555", "name": "Storage - L2" }],
-  "Ops, EMEA - L2": [{ "sys_id": "66666666666666666666666666666666", "name": "Ops, EMEA - L2" }]
+  "Ops, EMEA - L2": [{ "sys_id": "66666666666666666666666666666666", "name": "Ops, EMEA - L2" }],
+  "Database - L3": [{ "sys_id": "77777777777777777777777777777777", "name": "Database - L3" }],
+  "Desktop - L3": [{ "sys_id": "88888888888888888888888888888888", "name": "Desktop - L3" }]
 }
