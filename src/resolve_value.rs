@@ -314,7 +314,11 @@ impl ResolveCtx<'_> {
         }
         match meta.map(|m| m.internal_type.as_str()) {
             Some("inferred_choice") => return FieldType::Choice,
-            Some("inferred_reference") => return FieldType::Reference { table: None },
+            Some("inferred_reference") => {
+                return FieldType::Reference {
+                    table: meta.and_then(|m| m.reference_table.clone()),
+                };
+            }
             _ => {}
         }
         if let Some(m) = dict_typed {
@@ -329,8 +333,10 @@ impl ResolveCtx<'_> {
         {
             let value = extract_field_value(sample, field).unwrap_or_default();
             let display = extract_field_display(sample, field).unwrap_or_default();
-            if sample.get(field).and_then(|v| v.get("link")).is_some() {
-                return FieldType::Reference { table: None };
+            if let Some(link) = sample.get(field).and_then(|v| v.get("link")) {
+                return FieldType::Reference {
+                    table: link.as_str().and_then(crate::untrusted::link_table),
+                };
             }
             if !value.is_empty() && display != value {
                 return FieldType::Choice;
@@ -1058,5 +1064,33 @@ values = [
             ctx.classify("assignment_group"),
             FieldType::Reference { .. }
         ));
+    }
+
+    #[test]
+    fn sampled_links_type_references_with_their_table() {
+        // DISC-1: with sys_dictionary unreadable, a `link` names the reference table when the
+        // table passes the table-name rule; otherwise the field is a reference of unknown table.
+        let p = pack(None);
+        let s = schema(&[]);
+        let record = json!({
+            "u_service": { "value": "a".repeat(32), "display_value": "Mail",
+                "link": format!("https://x.service-now.com/api/now/table/cmdb_ci_service/{}", "a".repeat(32)) },
+            "u_odd": { "value": "1", "display_value": "One",
+                "link": "https://x.service-now.com/api/now/table/Bad-Table/1" },
+        });
+        let ctx = ResolveCtx {
+            pack: &p,
+            table: "incident",
+            schema: &s,
+            sample: Some(&record),
+            discovered: None,
+        };
+        assert_eq!(
+            ctx.classify("u_service"),
+            FieldType::Reference {
+                table: Some("cmdb_ci_service".to_string())
+            }
+        );
+        assert_eq!(ctx.classify("u_odd"), FieldType::Reference { table: None });
     }
 }
