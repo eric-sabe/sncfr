@@ -7,14 +7,15 @@ use crate::client::{
 use crate::error::SncfrError;
 use crate::output::{ResolvedOutputFormat, osc8_link};
 use crate::resolve::{is_sys_id, load_or_sync_prefixes, resolve_table_name, resolve_ticket};
-use crate::schema::{load_or_sync_table_schema, resolve_choice_value};
+use crate::resolve_value::{ResolveCtx, resolve_choice, resolve_field};
+use crate::schema::load_or_sync_table_schema;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldDiff {
     pub field: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23,6 +24,62 @@ pub struct FieldDiff {
     pub before_value: Option<String>,
     pub after_display: String,
     pub after_value: String,
+    /// Where the value was confirmed (SAFE-2): `pack`, `ootb`, `cache`, `sys_choice`,
+    /// `discovered`, `input` (free text), a reference resolution such as `group:exact`, or `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// `verified`, `verified (in-use set)`, `UNVERIFIABLE (<reason>)`, `allowed unverified
+    /// (<reason>)`, or `n/a (free text)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Details when the value could not be confirmed (SAFE-3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverifiable: Option<UnverifiableField>,
+}
+
+/// A value that could not be confirmed against an active pack or instance metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnverifiableField {
+    pub field: String,
+    pub input: String,
+    pub would_send: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested: Option<String>,
+}
+
+impl FieldDiff {
+    /// A diff row for a resolved value, carrying its source and verification status.
+    pub fn from_resolved(
+        field: &str,
+        before: Option<(String, String)>,
+        input: &str,
+        resolved: &crate::resolve_value::ResolvedValue,
+    ) -> Self {
+        Self {
+            field: field.to_string(),
+            before_display: before.as_ref().map(|b| b.0.clone()),
+            before_value: before.as_ref().map(|b| b.1.clone()),
+            after_display: resolved.display(),
+            after_value: resolved.value().to_string(),
+            source: Some(resolved.source_label()),
+            status: Some(resolved.status_label()),
+            unverifiable: resolved.unverifiable().map(|reason| UnverifiableField {
+                field: field.to_string(),
+                input: input.to_string(),
+                would_send: resolved.value().to_string(),
+                reason: reason.as_str().to_string(),
+                candidates: resolved
+                    .candidates()
+                    .iter()
+                    .map(|(v, l)| format!("{l} ({v})"))
+                    .collect(),
+                suggested: resolved.suggested().map(str::to_string),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +142,7 @@ pub async fn execute_comment_or_note(
         before_value: None,
         after_display: body_text.clone(),
         after_value: body_text.clone(),
+        ..Default::default()
     };
 
     if let Some(write_permit) = permit {
@@ -150,6 +208,13 @@ pub async fn execute_update(
         resolved.table, resolved.sys_id
     );
 
+    let ctx = ResolveCtx {
+        pack: crate::pack::active(),
+        table: &resolved.table,
+        schema: &schema,
+        sample: Some(&resolved.record),
+        discovered: None,
+    };
     let mut diffs = Vec::new();
     let mut payload = Map::new();
 
@@ -162,16 +227,10 @@ pub async fn execute_update(
         ("close_code", &args.close_code),
     ] {
         if let Some(input_val) = opt_val {
-            let (after_disp, after_val) = resolve_choice_value(&schema, field, input_val)?;
+            let value = resolve_choice(&ctx, field, input_val)?;
             let before = extract_field_pair(&resolved.record, field);
-            diffs.push(FieldDiff {
-                field: field.to_string(),
-                before_display: before.as_ref().map(|b| b.0.clone()),
-                before_value: before.as_ref().map(|b| b.1.clone()),
-                after_display: after_disp,
-                after_value: after_val.clone(),
-            });
-            payload.insert(field.to_string(), Value::String(after_val));
+            diffs.push(FieldDiff::from_resolved(field, before, input_val, &value));
+            payload.insert(field.to_string(), Value::String(value.value().to_string()));
         }
     }
 
@@ -185,6 +244,7 @@ pub async fn execute_update(
             before_value: before.as_ref().map(|b| b.1.clone()),
             after_display: after_disp,
             after_value: after_val.clone(),
+            ..Default::default()
         });
         payload.insert("assigned_to".to_string(), Value::String(after_val));
     }
@@ -198,6 +258,7 @@ pub async fn execute_update(
             before_value: before.as_ref().map(|b| b.1.clone()),
             after_display: after_disp,
             after_value: after_val.clone(),
+            ..Default::default()
         });
         payload.insert("assignment_group".to_string(), Value::String(after_val));
     }
@@ -222,6 +283,9 @@ pub async fn execute_update(
                 before_value: before.as_ref().map(|b| b.1.clone()),
                 after_display: val.clone(),
                 after_value: val.clone(),
+                source: Some("input".to_string()),
+                status: Some("n/a (free text)".to_string()),
+                ..Default::default()
             });
             payload.insert(field.to_string(), Value::String(val.clone()));
         }
@@ -230,20 +294,10 @@ pub async fn execute_update(
     // 4. Arbitrary `--set field=value` pairs
     for kv in &args.set_fields {
         let (k, v) = parse_key_value_pair(kv)?;
-        let (after_disp, after_val) = if schema.choices.contains_key(&k) {
-            resolve_choice_value(&schema, &k, &v)?
-        } else {
-            (v.clone(), v)
-        };
+        let value = resolve_field(&ctx, &k, &v)?;
         let before = extract_field_pair(&resolved.record, &k);
-        diffs.push(FieldDiff {
-            field: k.clone(),
-            before_display: before.as_ref().map(|b| b.0.clone()),
-            before_value: before.as_ref().map(|b| b.1.clone()),
-            after_display: after_disp,
-            after_value: after_val.clone(),
-        });
-        payload.insert(k, Value::String(after_val));
+        diffs.push(FieldDiff::from_resolved(&k, before, &v, &value));
+        payload.insert(k, Value::String(value.value().to_string()));
     }
 
     if payload.is_empty() {
@@ -299,6 +353,13 @@ pub async fn execute_create(
     let prefixes = load_or_sync_prefixes(&client, cache, false).await?;
     let table = resolve_table_name(&args.table_or_prefix, &prefixes);
     let schema = load_or_sync_table_schema(&client, cache, &table, false).await?;
+    let ctx = ResolveCtx {
+        pack: crate::pack::active(),
+        table: &table,
+        schema: &schema,
+        sample: None,
+        discovered: None,
+    };
 
     let mut diffs = Vec::new();
     let mut payload = Map::new();
@@ -309,6 +370,7 @@ pub async fn execute_create(
         before_value: None,
         after_display: args.short_description.clone(),
         after_value: args.short_description.clone(),
+        ..Default::default()
     });
     payload.insert(
         "short_description".to_string(),
@@ -322,6 +384,7 @@ pub async fn execute_create(
             before_value: None,
             after_display: desc.clone(),
             after_value: desc.clone(),
+            ..Default::default()
         });
         payload.insert("description".to_string(), Value::String(desc.clone()));
     }
@@ -332,15 +395,9 @@ pub async fn execute_create(
         ("impact", &args.impact),
     ] {
         if let Some(input_val) = opt_val {
-            let (after_disp, after_val) = resolve_choice_value(&schema, field, input_val)?;
-            diffs.push(FieldDiff {
-                field: field.to_string(),
-                before_display: None,
-                before_value: None,
-                after_display: after_disp,
-                after_value: after_val.clone(),
-            });
-            payload.insert(field.to_string(), Value::String(after_val));
+            let value = resolve_choice(&ctx, field, input_val)?;
+            diffs.push(FieldDiff::from_resolved(field, None, input_val, &value));
+            payload.insert(field.to_string(), Value::String(value.value().to_string()));
         }
     }
 
@@ -352,6 +409,7 @@ pub async fn execute_create(
             before_value: None,
             after_display: after_disp,
             after_value: after_val.clone(),
+            ..Default::default()
         });
         payload.insert("assigned_to".to_string(), Value::String(after_val));
     }
@@ -364,6 +422,7 @@ pub async fn execute_create(
             before_value: None,
             after_display: after_disp,
             after_value: after_val.clone(),
+            ..Default::default()
         });
         payload.insert("assignment_group".to_string(), Value::String(after_val));
     }
@@ -377,25 +436,16 @@ pub async fn execute_create(
             before_value: None,
             after_display: after_disp,
             after_value: after_val.clone(),
+            ..Default::default()
         });
         payload.insert(caller_field.to_string(), Value::String(after_val));
     }
 
     for kv in &args.set_fields {
         let (k, v) = parse_key_value_pair(kv)?;
-        let (after_disp, after_val) = if schema.choices.contains_key(&k) {
-            resolve_choice_value(&schema, &k, &v)?
-        } else {
-            (v.clone(), v)
-        };
-        diffs.push(FieldDiff {
-            field: k.clone(),
-            before_display: None,
-            before_value: None,
-            after_display: after_disp,
-            after_value: after_val.clone(),
-        });
-        payload.insert(k, Value::String(after_val));
+        let value = resolve_field(&ctx, &k, &v)?;
+        diffs.push(FieldDiff::from_resolved(&k, None, &v, &value));
+        payload.insert(k, Value::String(value.value().to_string()));
     }
 
     let base_url = client.base_url().as_str().trim_end_matches('/').to_string();
@@ -841,18 +891,28 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
 
             if !report.diffs.is_empty() {
                 out.push_str("## Field Changes (Before -> After)\n\n");
-                out.push_str("| Field | Before | After | Raw Value |\n");
-                out.push_str("| :--- | :--- | :--- | :--- |\n");
+                out.push_str(
+                    "| Field | Before | After (label) | Sends (value) | Source | Status |\n",
+                );
+                out.push_str("| :--- | :--- | :--- | :--- | :--- | :--- |\n");
                 // Before values come from the instance and after values from the caller (often
                 // an agent): neither may add table cells, rows, or escapes (NA-9).
                 for d in &report.diffs {
                     let before = d.before_display.as_deref().unwrap_or("(new/append)");
+                    let status = d.status.as_deref().unwrap_or("—");
+                    let status = if status.starts_with("UNVERIFIABLE") {
+                        format!("**{status}**")
+                    } else {
+                        status.to_string()
+                    };
                     out.push_str(&format!(
-                        "| `{}` | {} | **{}** | `{}` |\n",
+                        "| `{}` | {} | **{}** | `{}` | {} | {} |\n",
                         crate::untrusted::inline(&d.field),
                         crate::untrusted::inline(before),
                         crate::untrusted::inline(&d.after_display),
-                        crate::untrusted::inline(&d.after_value)
+                        crate::untrusted::inline(&d.after_value),
+                        d.source.as_deref().unwrap_or("—"),
+                        status
                     ));
                 }
                 out.push('\n');
@@ -911,7 +971,9 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
                     .load_preset(UTF8_FULL_CONDENSED)
                     .set_content_arrangement(ContentArrangement::Dynamic)
                     .set_width(width)
-                    .set_header(vec!["FIELD", "BEFORE", "AFTER", "RAW_VALUE"]);
+                    .set_header(vec![
+                        "FIELD", "BEFORE", "AFTER", "SENDS", "SOURCE", "STATUS",
+                    ]);
                 // No instance- or caller-supplied text reaches the terminal with control or
                 // escape sequences, which could rewrite or hide lines of the preview (NA-9).
                 for d in &report.diffs {
@@ -920,6 +982,8 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
                         crate::untrusted::clean(d.before_display.as_deref().unwrap_or("(none)")),
                         crate::untrusted::clean(&d.after_display),
                         crate::untrusted::clean(&d.after_value),
+                        d.source.clone().unwrap_or_else(|| "—".to_string()),
+                        d.status.clone().unwrap_or_else(|| "—".to_string()),
                     ]);
                 }
                 out.push_str(&table.to_string());
@@ -1096,6 +1160,7 @@ mod tests {
                 before_value: None,
                 after_display: "new | forged | cell\n## heading".to_string(),
                 after_value: "x".to_string(),
+                ..Default::default()
             }],
             attachments: vec![],
             commit_command: None,
