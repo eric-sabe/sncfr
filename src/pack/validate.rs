@@ -496,6 +496,43 @@ mod tests {
     }
 
     #[test]
+    fn example_pack_validates_clean_and_covers_every_section() {
+        // CT-06 (PACK-9)
+        let text = include_str!("../../docs/packs/example.pack.toml");
+        let file = parse_pack(text).expect("example pack parses");
+        let f = validate_user_pack(text, &file, active());
+        assert!(f.errors.is_empty(), "{:?}", f.errors);
+        let json = serde_json::to_value(&file).expect("json");
+        for section in [
+            "capabilities",
+            "limits",
+            "auth",
+            "doctor",
+            "core",
+            "hierarchy",
+            "prefixes",
+            "choices",
+            "open_rule",
+            "closed_rule",
+            "groups",
+            "fields",
+            "discovery",
+            "recipes",
+            "catalog",
+            "audit",
+            "triage",
+            "remove",
+        ] {
+            assert!(
+                !json[section].is_null(),
+                "example pack is missing [{section}]"
+            );
+        }
+        assert_eq!(file.status, PackStatus::Active);
+        assert_eq!(file.instances, vec!["example.service-now.com".to_string()]);
+    }
+
+    #[test]
     fn query_fragment_rules() {
         assert!(encoded_query_fragment_problem("active=true^stateNOT IN6,7,8").is_none());
         assert!(encoded_query_fragment_problem("caller_id.vip=true^ORpriority=1").is_none());
