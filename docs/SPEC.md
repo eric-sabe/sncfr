@@ -137,6 +137,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
     - `--watch-list <user|@me>`
     - `--active` / `--inactive` / `--state <state,...>`
     - `--priority <1..5,...>`
+    - `--state` / `--priority` values resolve per target table through the same chain as mutations (§4.2, Q-1). A `task`-level query with no `task`-level definition requires every child table with a known set (pack or schema cache) to agree, else exit `2` naming the tables. Values that can't be verified are sent as typed and reported in-band (a ⚠ line above the results; envelope `unverified_filters[]`); this never blocks a read.
     - `--updated-since <duration|timestamp>` (e.g., `4h`, `2d`, `2026-10-20`)
     - `--created-since <duration|timestamp>`
     - `--from-url <servicenow-ui-url>` (parses `sysparm_query` and table name directly from a pasted ServiceNow browser URL, including `/now/nav/ui/classic/params/target/...` URLs)
