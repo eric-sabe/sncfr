@@ -65,6 +65,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "SNCFR_PACK")]
     pub pack: Option<PathBuf>,
 
+    /// Per-request timeout in seconds (1-300; default 30, or profile `timeout_secs`)
+    #[arg(long, global = true, env = "SNCFR_TIMEOUT", value_name = "SECS")]
+    pub timeout: Option<u64>,
+
     /// Send these UNVERIFIABLE fields exactly as typed (explicit names only; catalog variables
     /// as `var:<name>`). Only on explicit user instruction (SAFE-4)
     #[arg(long, global = true, value_delimiter = ',', value_name = "FIELD,...")]
