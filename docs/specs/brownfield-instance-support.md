@@ -1297,7 +1297,7 @@ Any assertion change is a BF-TEST-3 violation.
 | CT-45d | Group name with U+E0041 and U+202E | stripped in SKILL.md | `src/untrusted.rs` |
 | CT-46 | `skill install --overlay`; target inside an unignored git worktree | marker + hash present, idempotent; worktree case needs `--force` (SKILL-1) | `src/skill.rs` |
 | CT-47 | `cmdb lookup 10.0.0.5`; a hostname with 2 matches | IP path returns support group + open tasks; duplicate → `ambiguous: true` (WF-1) | `tests/brownfield.rs` |
-| CT-50 | leakcheck on `realco.service-now.com`, `notexample.service-now.com`, `REALCO.SERVICE-NOW.COM`, `agency.servicenowservices.com`; denylist hit | all fail; `example`/`mycompany` pass; the CI log never contains the denylist term (NA-11) | `scripts/leakcheck.sh` self-test + CI |
+| CT-50 | leakcheck on hosts `realco`, `notexample`, upper-case `REALCO` (all under `service-now.com`) and `agency` under `servicenowservices.com`; a denylist hit; a host in a commit message (the self-test assembles these at runtime so the repo never contains them) | all fail; `example`/`mycompany` pass; the CI log never contains the denylist term (NA-11) | `scripts/leakcheck.sh` self-test + CI |
 | CT-60 | Ticket with my `rejected` approval and another user's `requested` approval | `approve --write` exit 5, zero PATCH (NA-15) | `src/workflows.rs` |
 | CT-61 | Two `requested` approvals linked to me (user + group) | exit 2 with candidates, zero PATCH | `src/workflows.rs` |
 | CT-62 | `sn_sc` 401 + Table API 200 + `order --write` | exit 4, zero POST of any kind (NA-16) | `tests/brownfield.rs` |

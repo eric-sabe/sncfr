@@ -18,6 +18,22 @@ Thanks for helping. Please read [`AGENTS.md`](AGENTS.md) first. It covers the pr
 
 **Use only these hostnames** in docs, tests, and examples: `example.service-now.com` and `mycompany.service-now.com`. The fictional organization for fixtures is **Example Corp**.
 
+## Leak scanning (CI and pre-commit)
+
+CI runs two leak checks on every push and PR:
+
+- `scripts/leakcheck.sh` flags any `*.service-now.com` / `*.servicenowservices.com` host other than the two allowed examples. It also flags any term from a private denylist, which CI loads from the `LEAKCHECK_DENYLIST` secret. It scans tracked files and the PR's commit messages.
+- [gitleaks](https://github.com/gitleaks/gitleaks), pinned by version and checksum, with `--redact`.
+
+Findings print only `file:line rule`, never the matched text.
+
+To catch leaks before they are committed, install the hook locally. It reads your own gitignored `.leakcheck/denylist.txt`, with one term per line:
+
+```bash
+printf '#!/bin/sh\nexec scripts/leakcheck.sh --staged\n' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+
 ## Reporting issues
 
 Describe behavior against a **fictional instance**, for example: "on an instance where `sys_choice` is unreadable and priority 4 is labeled `4 - Minor`, `sncfr update … --priority low` does X". Redact hostnames, names, and sys_ids from logs before pasting them. `sncfr -v` output includes request URLs and queries.
