@@ -22,13 +22,15 @@ pub enum ErrorCode {
     ReadOnlyLocked,
     /// Exit code 7: Network, TLS, rate-limit (429), or ServiceNow 5xx instance error.
     NetworkOrInstanceError,
+    /// Exit code 2: An Instance Pack failed to parse or validate (ADR-0004).
+    PackInvalid,
 }
 
 impl ErrorCode {
     /// Deterministic exit code per `docs/SPEC.md` Section 6.2.
     pub const fn exit_code(self) -> u8 {
         match self {
-            Self::InvalidArgs | Self::ValidationError => 2,
+            Self::InvalidArgs | Self::ValidationError | Self::PackInvalid => 2,
             Self::AuthExpired | Self::AuthRequired => 3,
             Self::AclForbidden => 4,
             Self::NotFound => 5,
@@ -48,6 +50,7 @@ impl ErrorCode {
             Self::NotFound => "NOT_FOUND",
             Self::ReadOnlyLocked => "READ_ONLY_LOCKED",
             Self::NetworkOrInstanceError => "NETWORK_OR_INSTANCE_ERROR",
+            Self::PackInvalid => "PACK_INVALID",
         }
     }
 }
@@ -95,6 +98,9 @@ pub enum SncfrError {
     #[error("Mutation blocked: profile or environment is locked to read-only mode ({reason})")]
     ReadOnlyLocked { reason: String },
 
+    #[error("Invalid Instance Pack '{pack}':\n  {}", .problems.join("\n  "))]
+    PackInvalid { pack: String, problems: Vec<String> },
+
     #[error("Network or ServiceNow instance error: {message}")]
     NetworkOrInstance {
         message: String,
@@ -132,6 +138,7 @@ impl SncfrError {
             Self::NotFound { .. } | Self::NoActionableApproval { .. } => ErrorCode::NotFound,
             Self::ReadOnlyLocked { .. } => ErrorCode::ReadOnlyLocked,
             Self::NetworkOrInstance { .. } => ErrorCode::NetworkOrInstanceError,
+            Self::PackInvalid { .. } => ErrorCode::PackInvalid,
         }
     }
 
@@ -163,6 +170,9 @@ impl SncfrError {
                     .to_string(),
             ),
             Self::NetworkOrInstance { remediation, .. } => remediation.clone(),
+            Self::PackInvalid { pack, .. } => Some(format!(
+                "Fix the listed problems, then check with `sncfr pack validate {pack}`."
+            )),
         }
     }
 
