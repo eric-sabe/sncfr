@@ -33,6 +33,12 @@ pub struct RecordListEnvelope {
     /// Filter values sent as typed because they could not be verified (Q-1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified_filters: Vec<crate::resolve_value::UnverifiedFilter>,
+    /// Open/closed rules applied by `--open` / `--closed` (Q-2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_rules: Vec<crate::query::AppliedRule>,
+    /// Notes about how flags were interpreted (e.g. literal `--active` on a ruled table).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Executes `sncfr list [@<view>] [flags]`.
@@ -136,10 +142,11 @@ async fn execute_filtered_query(
     eq.validate()?;
 
     // Default sort by `sys_updated_on` descending when no sort order was specified
-    let mut query_str = eq.build();
+    let plan = crate::query::plan_open_rules(crate::pack::active(), &table, filters)?;
+    let mut query_str = eq.build_with(&plan);
     if !query_str.contains("ORDERBY") {
         eq.order_by_desc("sys_updated_on");
-        query_str = eq.build();
+        query_str = eq.build_with(&plan);
     }
 
     let requested_columns: Vec<String> = if !filters.fields.is_empty() {
@@ -260,7 +267,30 @@ async fn execute_filtered_query(
         total,
         records: pruned_records,
         unverified_filters,
+        open_rules: plan.applied,
+        notes: plan.notes,
     })
+}
+
+/// Footer lines for applied open/closed rules and flag notes (Q-2, Q-3).
+fn rule_notes(envelope: &RecordListEnvelope) -> String {
+    let mut out = String::new();
+    for r in &envelope.open_rules {
+        let workaround = match (&r.defect_ref, r.workaround) {
+            (Some(d), true) => format!(" (workaround: {})", crate::untrusted::inline(d)),
+            (None, true) => " (workaround)".to_string(),
+            _ => String::new(),
+        };
+        out.push_str(&format!(
+            "open = pack rule for {}: `{}`{workaround}\n",
+            r.table,
+            crate::untrusted::inline(&r.query)
+        ));
+    }
+    for n in &envelope.notes {
+        out.push_str(&format!("note: {n}\n"));
+    }
+    out
 }
 
 fn infer_table_columns(rows: &[Value]) -> Vec<String> {
@@ -318,6 +348,7 @@ pub fn format_record_list(envelope: &RecordListEnvelope, format: ResolvedOutputF
                 &envelope.unverified_filters,
                 envelope.records.is_empty(),
             ));
+            out.push_str(&rule_notes(envelope));
             if envelope.records.is_empty() {
                 out.push_str("_No matching records._\n");
                 return out;
@@ -346,7 +377,7 @@ pub fn format_record_list(envelope: &RecordListEnvelope, format: ResolvedOutputF
                 &envelope.table,
                 &envelope.unverified_filters,
                 envelope.records.is_empty(),
-            );
+            ) + &rule_notes(envelope);
             if envelope.records.is_empty() {
                 return format!(
                     "{notes}No records found in '{}' matching query `{}`.",
