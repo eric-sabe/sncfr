@@ -1944,6 +1944,8 @@ pub struct AuthStatusSummary {
     pub auth_method: String,
     pub read_only_locked: bool,
     pub identity: CachedIdentity,
+    /// Merged Instance Pack identity (PACK-6).
+    pub pack: crate::pack::PackSummary,
 }
 
 /// Resolves the current `@me` [`CachedIdentity`] (`sys_user` + `sys_user_grmember` active groups),
@@ -2106,6 +2108,7 @@ pub async fn execute_auth_status(
         auth_method: profile.auth_method.as_str().to_string(),
         read_only_locked: profile.is_read_only_locked(),
         identity,
+        pack: crate::pack::active().summary(),
     })
 }
 

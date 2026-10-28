@@ -85,6 +85,34 @@ pub struct Workaround {
     pub defect_ref: Option<String>,
 }
 
+/// Compact pack identity for `doctor` and `auth status` (PACK-6, PACK-7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct PackSummary {
+    pub name: String,
+    pub pack_version: String,
+    pub status: PackStatus,
+    pub hash: String,
+    pub layers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workarounds: Vec<String>,
+}
+
+impl PackSummary {
+    /// `<name> <version> · <status> · sha256:<12 hex>`.
+    pub fn headline(&self) -> String {
+        let status = match self.status {
+            PackStatus::Active => "active",
+            PackStatus::Draft => "draft",
+        };
+        format!(
+            "{} {} · {status} · {}",
+            self.name,
+            self.pack_version,
+            self.hash.get(..19).unwrap_or(&self.hash)
+        )
+    }
+}
+
 /// One loaded layer, as reported by `pack show` / `doctor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LayerInfo {
@@ -223,6 +251,109 @@ impl MergedPack {
         let digest = Sha256::digest(&canonical);
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         format!("sha256:{hex}")
+    }
+
+    pub fn summary(&self) -> PackSummary {
+        PackSummary {
+            name: self.name.clone(),
+            pack_version: self.pack_version.clone(),
+            status: self.status,
+            hash: self.hash.clone(),
+            layers: self
+                .layers
+                .iter()
+                .map(|l| match &l.path {
+                    Some(p) => format!("{} ({p})", l.origin.as_str()),
+                    None => l.origin.as_str().to_string(),
+                })
+                .collect(),
+            workarounds: self
+                .workarounds()
+                .into_iter()
+                .map(|w| match w.defect_ref {
+                    Some(d) => format!("{}: {d}", w.key),
+                    None => w.key,
+                })
+                .collect(),
+        }
+    }
+
+    /// The merged pack as a single re-loadable pack file (`pack show --toml`).
+    pub fn to_pack_file(&self) -> PackFile {
+        use super::schema::{
+            AuditSection, AuthSection, CoreSection, DiscoverySection, DoctorSection, FieldsSection,
+            LimitsSection,
+        };
+        fn plain<T: Clone>(m: &BTreeMap<String, Sourced<T>>) -> Option<BTreeMap<String, T>> {
+            (!m.is_empty()).then(|| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.value.clone()))
+                    .collect()
+            })
+        }
+        let mut choices: BTreeMap<String, BTreeMap<String, ChoiceSetFile>> = BTreeMap::new();
+        for (key, set) in &self.choices {
+            if let Some((table, field)) = key.split_once('.') {
+                choices
+                    .entry(table.to_string())
+                    .or_default()
+                    .insert(field.to_string(), set.value.clone());
+            }
+        }
+        let c = &self.core;
+        PackFile {
+            schema_version: super::schema::SUPPORTED_SCHEMA_VERSION,
+            pack_version: self.pack_version.clone(),
+            name: self.name.clone(),
+            status: self.status,
+            instances: self.safety.instances.iter().flatten().cloned().collect(),
+            capabilities: Some(self.capabilities.clone()),
+            limits: self
+                .safety
+                .max_requests_per_minute
+                .map(|rpm| LimitsSection {
+                    max_requests_per_minute: Some(rpm),
+                }),
+            auth: (!self.safety.allow_credentials_file).then_some(AuthSection {
+                allow_credentials_file: Some(false),
+            }),
+            doctor: (!self.doctor_absent_tables_ok.is_empty()).then(|| DoctorSection {
+                extra_probe_tables: Vec::new(),
+                absent_tables_ok: self.doctor_absent_tables_ok.clone(),
+            }),
+            core: Some(CoreSection {
+                probe_tables: Some(c.probe_tables.clone()),
+                list_columns: Some(c.list_columns.clone()),
+                dossier_core_fields: Some(c.dossier_core_fields.clone()),
+                feed_fields: Some(c.feed_fields.clone()),
+                caller_fields: Some(c.caller_fields.clone()),
+                known_free_text: None,
+                table_aliases: Some(c.table_aliases.clone()),
+            }),
+            hierarchy: plain(&self.hierarchy),
+            prefixes: plain(&self.prefixes),
+            choices: (!choices.is_empty()).then_some(choices),
+            open_rule: plain(&self.open_rules),
+            closed_rule: plain(&self.closed_rules),
+            groups: Some(self.groups.clone()),
+            fields: (!self.fields_default.is_empty()).then(|| FieldsSection {
+                default: plain(&self.fields_default).unwrap_or_default(),
+            }),
+            discovery: Some(DiscoverySection {
+                choice_fields: self.discovery_choice_fields.clone(),
+            }),
+            recipes: plain(&self.recipes),
+            catalog: Some(self.catalog.clone()),
+            audit: self
+                .safety
+                .agent_write_marker
+                .clone()
+                .map(|m| AuditSection {
+                    agent_write_marker: Some(m),
+                }),
+            triage: Some(self.triage.clone()),
+            remove: None,
+        }
     }
 
     /// `sha256:` plus the first 12 hex characters, for human output.

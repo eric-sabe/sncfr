@@ -2,9 +2,11 @@
 
 pub mod merged;
 pub mod schema;
+pub mod validate;
 
 use crate::error::SncfrError;
-pub use merged::{MergedPack, PackOrigin, SafetyKeys, Sourced, Workaround};
+pub use merged::{MergedPack, PackOrigin, PackSummary, SafetyKeys, Sourced, Workaround};
+pub mod report;
 use schema::{PackFile, SUPPORTED_SCHEMA_VERSION};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -20,14 +22,20 @@ pub fn ootb_file() -> PackFile {
     parse_pack(OOTB_PACK_TOML).unwrap_or_else(|p| panic!("bundled ootb pack is invalid: {p:?}"))
 }
 
+/// The bundled pack on its own, independent of what is installed for the process.
+pub fn ootb_merged() -> MergedPack {
+    MergedPack::from_layers(&[(PackOrigin::Ootb, &ootb_file(), None)])
+}
+
 /// The merged pack for this process. Installed once by `main` after loading the configured layers;
 /// anything that runs before that (or in unit tests) sees the `ootb` pack alone.
 pub fn active() -> &'static MergedPack {
-    ACTIVE.get_or_init(|| MergedPack::from_layers(&[(PackOrigin::Ootb, &ootb_file(), None)]))
+    ACTIVE.get_or_init(ootb_merged)
 }
 
-/// Reads and parses one pack file, mapping any problem to `PACK_INVALID` (exit 2).
-pub fn read_pack_file(path: &Path) -> Result<PackFile, SncfrError> {
+/// Reads a pack file and runs strict parsing plus semantic validation (PACK-5).
+/// Returns the parsed pack (when it parsed) and every finding.
+pub fn check_pack_file(path: &Path) -> Result<(Option<PackFile>, validate::Findings), SncfrError> {
     let source = path.display().to_string();
     let text = std::fs::read_to_string(path).map_err(|e| SncfrError::InvalidArgs {
         message: format!("Cannot read Instance Pack '{source}': {e}"),
@@ -35,7 +43,29 @@ pub fn read_pack_file(path: &Path) -> Result<PackFile, SncfrError> {
             "Check the `pack = \"…\"` path in config.toml, `--pack`, or `SNCFR_PACK`.".to_string(),
         ),
     })?;
-    parse_pack(&text).map_err(|problems| invalid(&source, &problems))
+    match parse_pack(&text) {
+        Ok(file) => {
+            // Not `active()`: loading runs before the merged pack is installed.
+            let findings = validate::validate_user_pack(&text, &file, &ootb_merged());
+            Ok((Some(file), findings))
+        }
+        Err(errors) => Ok((
+            None,
+            validate::Findings {
+                errors,
+                warnings: Vec::new(),
+            },
+        )),
+    }
+}
+
+/// Reads one user pack file; any parse or validation error is `PACK_INVALID` (exit 2).
+pub fn read_pack_file(path: &Path) -> Result<PackFile, SncfrError> {
+    let (file, findings) = check_pack_file(path)?;
+    match file {
+        Some(f) if findings.errors.is_empty() => Ok(f),
+        _ => Err(invalid(&path.display().to_string(), &findings.errors)),
+    }
 }
 
 /// Loads `ootb` ⊕ profile pack ⊕ override pack (ADR-0004).

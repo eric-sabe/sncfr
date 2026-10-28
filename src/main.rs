@@ -7,7 +7,8 @@ use sncfr::auth::{
 };
 use sncfr::cache::InstanceCache;
 use sncfr::cli::{
-    ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands, SkillCommands,
+    ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands, PackCommands,
+    SkillCommands,
 };
 use sncfr::client::{ReadOnlyClient, WritePermit};
 use sncfr::config::{AppConfig, ResolvedProfile};
@@ -96,6 +97,8 @@ async fn main() -> ExitCode {
     }
 
     // Load and install the Instance Pack before anything can select a credential store (NA-5).
+    // `pack validate` checks an arbitrary file, so it must still run when the configured pack fails.
+    let validating_pack = matches!(&cli.command, Commands::Pack(PackCommands::Validate { .. }));
     match load_instance_pack(&cli, resolved_profile.as_ref()) {
         Ok(pack) => {
             sncfr::debug_log!(
@@ -105,8 +108,17 @@ async fn main() -> ExitCode {
                 pack.short_hash(),
                 pack.layers.len()
             );
-            sncfr::pack::install(pack);
+            if !sncfr::pack::install(pack) {
+                let err = SncfrError::InvalidArgs {
+                    message: "internal error: the Instance Pack was read before it was installed"
+                        .to_string(),
+                    remediation: None,
+                };
+                eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                return err.exit_code();
+            }
         }
+        Err(_) if validating_pack => {}
         Err(err) => {
             eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
             return err.exit_code();
@@ -196,6 +208,37 @@ async fn main() -> ExitCode {
                     return err.exit_code();
                 }
             }
+        }
+        Commands::Pack(PackCommands::Validate { path }) => {
+            return match sncfr::pack::report::execute_pack_validate(path) {
+                Ok(v) => {
+                    println!(
+                        "{}",
+                        sncfr::pack::report::format_pack_validation(&v, resolved_output)
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    err.exit_code()
+                }
+            };
+        }
+        Commands::Pack(PackCommands::Show { toml }) => {
+            return match sncfr::pack::report::format_pack_show(
+                sncfr::pack::active(),
+                *toml,
+                resolved_output,
+            ) {
+                Ok(out) => {
+                    println!("{out}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    err.exit_code()
+                }
+            };
         }
         Commands::Skill(subcmd) => match subcmd {
             SkillCommands::Print => {
@@ -407,7 +450,7 @@ async fn execute_authenticated_command(
                 Ok(format_mutation_report(&report, resolved_output))
             }
         },
-        Commands::Auth(_) | Commands::Skill(_) => unreachable!(),
+        Commands::Auth(_) | Commands::Skill(_) | Commands::Pack(_) => unreachable!(),
     }
 }
 
@@ -447,6 +490,7 @@ fn render_auth_status(summary: &AuthStatusSummary, format: ResolvedOutputFormat)
                 .collect();
             println!("Profile:    {} ({})", summary.profile, summary.instance_url);
             println!("Auth:       {} (AUTHENTICATED)", summary.auth_method);
+            println!("Pack:       {}", summary.pack.headline());
             println!(
                 "User (@me): {} ({}) [sys_id: {}]",
                 summary.identity.display_name, summary.identity.user_name, summary.identity.sys_id
