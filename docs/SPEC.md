@@ -92,7 +92,7 @@ When a mutating command (`comment`, `note`, `update`, `create`, `attach`, `appro
 3. an in-use set discovered via the Aggregate API;
 4. nothing, which gives `UNVERIFIABLE (no_metadata)`.
 
-Fields whose type or existence cannot be established are `UNVERIFIABLE`, never treated as free text. When `sys_dictionary` is forbidden or returns no rows, fields are inferred from one sample record. Full rules and the normative outcome table: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md) §Field typing and value resolution.
+Fields whose type or existence cannot be established are `UNVERIFIABLE`, never treated as free text. When `sys_dictionary` is forbidden or returns no rows, fields are inferred from one sample record (`display_value=all`, reference links kept). A sampled field whose `link` is `…/api/now/table/<t>/<id>` is typed as a reference to `<t>` when `<t>` passes the table-name rule, and as a reference of unknown table otherwise (DISC-1). Full rules and the normative outcome table: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md) §Field typing and value resolution.
 
 ---
 
