@@ -228,8 +228,11 @@ pub async fn assemble_ticket_dossier(
     let sys_id = &resolved.sys_id;
 
     if !args.no_journal {
+        // PERF-3: `name` keeps sys_journal_field on its index; journal rows are stored under the
+        // record's own table or `task`.
+        let table = &resolved.table;
         let url = format!(
-            "/api/now/table/sys_journal_field?sysparm_query=element_id={sys_id}^elementINcomments,work_notes^ORDERBYsys_created_on&sysparm_display_value=all&sysparm_fields=sys_id,element,value,sys_created_on,sys_created_by&sysparm_limit=200"
+            "/api/now/table/sys_journal_field?sysparm_query=nameIN{table},task^element_id={sys_id}^elementINcomments,work_notes^ORDERBYsys_created_on&sysparm_display_value=all&sysparm_fields=sys_id,element,value,sys_created_on,sys_created_by&sysparm_limit=200"
         );
         batch_reqs.push(BatchGetSubRequest::new("journal", url));
     }
@@ -245,7 +248,8 @@ pub async fn assemble_ticket_dossier(
 
     if let Some(ritm_id) = &ritm_sys_id {
         let url = format!(
-            "/api/now/table/sc_item_option_mtom?sysparm_query=request_item={ritm_id}^ORDERBYsc_item_option.order&sysparm_display_value=all&sysparm_fields=sc_item_option.item_option_new,sc_item_option.value&sysparm_limit=100"
+            // PERF-5: no ORDERBY on the dot-walked join; `order` is fetched and sorted here.
+            "/api/now/table/sc_item_option_mtom?sysparm_query=request_item={ritm_id}&sysparm_display_value=all&sysparm_fields=sc_item_option.item_option_new,sc_item_option.value,sc_item_option.order&sysparm_limit=100"
         );
         batch_reqs.push(BatchGetSubRequest::new("catalog_vars", url));
     }
@@ -363,6 +367,12 @@ pub async fn assemble_ticket_dossier(
             if let Ok(val) = sub.decode_json::<Value>()
                 && let Some(rows) = val.get("result").and_then(Value::as_array)
             {
+                let mut rows: Vec<&Value> = rows.iter().collect();
+                rows.sort_by_key(|r| {
+                    extract_field_value(r, "sc_item_option.order")
+                        .and_then(|o| o.parse::<i64>().ok())
+                        .unwrap_or(i64::MAX)
+                });
                 for row in rows {
                     let question = extract_field_display(row, "sc_item_option.item_option_new");
                     let answer = extract_field_display(row, "sc_item_option.value");
