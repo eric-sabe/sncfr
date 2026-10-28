@@ -54,7 +54,7 @@ fn default_view_table() -> String {
 }
 
 /// Per-instance connection profile (`[profiles.<name>]` in `config.toml`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileConfig {
     /// Target ServiceNow instance URL or shorthand name (e.g., `https://mycompany.service-now.com`).
     pub instance: String,
@@ -70,6 +70,13 @@ pub struct ProfileConfig {
     /// Named saved views (`sncfr list @<view>`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub views: BTreeMap<String, SavedView>,
+    /// Instance Pack for this profile (ADR-0004). `~` is expanded; relative paths resolve against
+    /// the directory that contains `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+    /// Forbid `--pack` / `SNCFR_PACK` overrides on this profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pack_locked: bool,
 }
 
 /// Top-level `config.toml` representation (`docs/SPEC.md` Section 7.1).
@@ -100,6 +107,10 @@ pub struct ResolvedProfile {
     pub read_only_lock_reason: Option<String>,
     /// Saved views available on this profile.
     pub views: BTreeMap<String, SavedView>,
+    /// Resolved path of the profile's Instance Pack, if any.
+    pub pack_path: Option<PathBuf>,
+    /// Whether `--pack` / `SNCFR_PACK` overrides are forbidden on this profile.
+    pub pack_locked: bool,
 }
 
 impl ResolvedProfile {
@@ -127,6 +138,28 @@ impl ResolvedProfile {
             }
         })
     }
+}
+
+/// Resolves a profile `pack =` path: expands a leading `~/` and makes relative paths relative to
+/// the directory containing `config.toml` (not the current directory).
+pub fn resolve_pack_path(raw: &str) -> Result<PathBuf, SncfrError> {
+    let raw = raw.trim();
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = directories::BaseDirs::new().ok_or_else(|| SncfrError::InvalidArgs {
+            message: "Cannot expand `~` in profile `pack` path: home directory not found"
+                .to_string(),
+            remediation: Some("Use an absolute path for `pack =` in config.toml.".to_string()),
+        })?;
+        return Ok(home.home_dir().join(rest));
+    }
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let config_path = default_config_path()?;
+    Ok(config_path
+        .parent()
+        .map_or_else(|| path.clone(), |dir| dir.join(&path)))
 }
 
 /// Returns the default configuration file path (`SNCFR_CONFIG` or `~/.config/sncfr/config.toml`).
@@ -285,8 +318,7 @@ impl AppConfig {
                 instance: instance_url.as_str().trim_end_matches('/').to_string(),
                 auth_method,
                 username: None,
-                read_only: false,
-                views: BTreeMap::new(),
+                ..ProfileConfig::default()
             });
         entry.instance = instance_url.as_str().trim_end_matches('/').to_string();
         entry.auth_method = auth_method;
@@ -335,6 +367,12 @@ impl AppConfig {
                     username: profile_cfg.username.clone(),
                     read_only_lock_reason,
                     views: profile_cfg.views.clone(),
+                    pack_path: profile_cfg
+                        .pack
+                        .as_deref()
+                        .map(resolve_pack_path)
+                        .transpose()?,
+                    pack_locked: profile_cfg.pack_locked,
                 });
             } else if cli.profile.is_some() && cli.instance.is_none() {
                 let available: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
@@ -366,6 +404,8 @@ impl AppConfig {
                 username: None,
                 read_only_lock_reason,
                 views: BTreeMap::new(),
+                pack_path: None,
+                pack_locked: false,
             });
         }
 
@@ -470,6 +510,7 @@ team-triage = { table = "incident", query = "assignment_group.name=Cloud Platfor
                 username: None,
                 read_only: false,
                 views: BTreeMap::new(),
+                ..Default::default()
             },
         );
         cfg.save_to_path(&path).expect("save config");

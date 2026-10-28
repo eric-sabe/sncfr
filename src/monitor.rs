@@ -730,6 +730,7 @@ mod tests {
                 username: None,
                 read_only: false,
                 views: BTreeMap::new(),
+                ..Default::default()
             },
         );
         let cli = crate::cli::Cli::try_parse_from(["sncfr", "stats", "--table", "inc"])

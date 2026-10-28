@@ -412,6 +412,7 @@ mod tests {
                 username: None,
                 read_only: false,
                 views,
+                ..Default::default()
             },
         );
 

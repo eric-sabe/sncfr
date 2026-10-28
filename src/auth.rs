@@ -103,21 +103,34 @@ impl StoredCredentials {
 
 /// Abstracts credential storage across the OS Keychain (`keyring`) and an optional file-backed store
 /// (`SNCFR_CREDENTIALS_FILE`) for headless/test environments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialStore {
     Keyring,
     File(PathBuf),
 }
 
 impl CredentialStore {
-    /// Returns the active [`CredentialStore`]: uses `SNCFR_CREDENTIALS_FILE` if set, otherwise OS Keychain.
-    pub fn default_store() -> Self {
-        if let Ok(path) = std::env::var("SNCFR_CREDENTIALS_FILE")
-            && !path.trim().is_empty()
-        {
-            Self::File(PathBuf::from(path))
-        } else {
-            Self::Keyring
+    /// Returns the active [`CredentialStore`]: `SNCFR_CREDENTIALS_FILE` if set, otherwise the OS
+    /// Keychain. The merged Instance Pack is consulted first, so a pack with
+    /// `allow_credentials_file = false` stops every command before the file is touched (NA-5).
+    pub fn default_store() -> Result<Self, SncfrError> {
+        Self::select(
+            std::env::var("SNCFR_CREDENTIALS_FILE").ok().as_deref(),
+            crate::pack::active().safety.allow_credentials_file,
+        )
+    }
+
+    /// Chooses the store for an `SNCFR_CREDENTIALS_FILE` value under the pack's policy.
+    pub fn select(credentials_file: Option<&str>, allow_file: bool) -> Result<Self, SncfrError> {
+        match credentials_file.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(_) if !allow_file => Err(SncfrError::InvalidArgs {
+                message: "SNCFR_CREDENTIALS_FILE is set, but the Instance Pack forbids credential files (`[auth] allow_credentials_file = false`)".to_string(),
+                remediation: Some(
+                    "Unset SNCFR_CREDENTIALS_FILE and store the session in the OS keychain (`sncfr auth login` or `sncfr auth import`).".to_string(),
+                ),
+            }),
+            Some(path) => Ok(Self::File(PathBuf::from(path))),
+            None => Ok(Self::Keyring),
         }
     }
 
@@ -2099,6 +2112,24 @@ pub async fn execute_auth_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_store_selection_honors_the_pack_policy() {
+        assert_eq!(
+            CredentialStore::select(None, false).unwrap(),
+            CredentialStore::Keyring
+        );
+        assert_eq!(
+            CredentialStore::select(Some("  "), false).unwrap(),
+            CredentialStore::Keyring
+        );
+        assert_eq!(
+            CredentialStore::select(Some("/tmp/c.json"), true).unwrap(),
+            CredentialStore::File(PathBuf::from("/tmp/c.json"))
+        );
+        let err = CredentialStore::select(Some("/tmp/c.json"), false).unwrap_err();
+        assert_eq!(err.code().exit_code(), 2);
+    }
     use tempfile::tempdir;
 
     #[test]
