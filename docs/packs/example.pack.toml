@@ -1,0 +1,124 @@
+# Example Instance Pack for the fictional "Example Corp" (ADR-0004, PACK-9).
+#
+# Every section is shown. Copy what you need into a private pack. Never commit a real
+# organization's pack to a public repository.
+#
+#   sncfr pack validate docs/packs/example.pack.toml
+#   sncfr --pack docs/packs/example.pack.toml pack show
+#
+# Spec: docs/specs/brownfield-instance-support.md (§Pack schema, §Field typing and value resolution)
+
+schema_version = 1
+pack_version = "2026.10.1"
+name = "example-corp"
+status = "active"                       # `discover` writes "draft"; drafts never authorize writes
+instances = ["example.service-now.com"] # writes are refused on any other instance
+
+# Seeds only: true -> Available, false -> Unavailable. Live observation overrides them.
+[capabilities]
+batch_api = false
+catalog_api = true
+
+[limits]
+max_requests_per_minute = 120
+
+# Safety keys can only tighten. With this set, SNCFR_CREDENTIALS_FILE is refused on every command.
+[auth]
+allow_credentials_file = false
+
+[doctor]
+extra_probe_tables = ["u_abc_request"]
+absent_tables_ok = ["sn_customerservice_case"]
+
+# Built-in defaults you may override (known_free_text is reserved to the bundled ootb pack).
+[core]
+list_columns = ["number", "priority", "state", "u_tier", "assignment_group", "short_description", "sys_updated_on"]
+caller_fields = { u_abc_request = "u_requester" }
+table_aliases = { abc = "u_abc_request" }
+
+# Custom table -> parent, for tables sncfr cannot look up in sys_db_object.
+[hierarchy]
+u_abc_request = "task"
+
+# PREFIX = table. Hyphenated numbers like ABC-1234567 are accepted for any prefix.
+[prefixes]
+ABC = "u_abc_request"
+
+# A user choice set is COMPLETE: values not listed are rejected (exit 2). List every value,
+# not only the ones you renamed.
+[choices.incident.priority]
+values = [
+  { value = "0", label = "0 - Emergency", aliases = ["p0", "emergency"] },
+  { value = "1", label = "1 - Critical", aliases = ["p1", "critical"] },
+  { value = "2", label = "2 - High", aliases = ["p2", "high"] },
+  { value = "3", label = "3 - Moderate", aliases = ["p3", "moderate"] },
+  { value = "4", label = "4 - Minor", aliases = ["p4", "minor"] },
+  { value = "5", label = "5 - Low", aliases = ["p5", "low"] },
+]
+
+[choices.u_abc_request.u_tier]
+values = [
+  { value = "gold", label = "Gold" },
+  { value = "silver", label = "Silver" },
+  { value = "bronze", label = "Bronze" },
+]
+
+# Example Corp's workflow leaves resolved incidents with active=true. `--open` uses this rule;
+# `--active` stays literal.
+[open_rule.incident]
+query = "active=true^stateNOT IN6,7,8"
+workaround = true
+defect_ref = "EXC-0001: resolved incidents keep active=true"
+
+[closed_rule.incident]
+query = "stateIN6,7,8"
+workaround = true
+defect_ref = "EXC-0001: resolved incidents keep active=true"
+
+[groups]
+suffixes = [" - L2", " - L3"]
+suggest_map = { "Network" = "Network Operations - L2" }   # suggestions only, never applied
+
+[fields.default.incident]
+list = ["number", "priority", "state", "u_tier", "assignment_group", "short_description"]
+dossier = ["u_tier", "u_customer_code"]
+
+[fields.default.cmdb_ci_server]
+list = ["name", "fqdn", "ip_address", "support_group", "install_status"]
+
+[discovery]
+choice_fields = { incident = ["priority", "state"], u_abc_request = ["u_tier"] }
+
+# Read-only recipes: steps are table | stats | show only.
+[recipes.ci-open-incidents]
+description = "Open incidents on a CI by hostname"
+params = ["host"]
+steps = [
+  { id = "ci", kind = "table", table = "cmdb_ci_server", query = "name={host}", fields = ["sys_id", "name"] },
+  { id = "inc", kind = "table", table = "task_ci", query = "ci_item={ci.sys_id}^task.active=true", fields = ["task"] },
+]
+
+[recipes.queue-by-priority]
+description = "Open incident counts by priority for a group"
+params = ["group"]
+steps = [
+  { id = "counts", kind = "stats", table = "incident", query = "active=true^assignment_group.name={group}", group_by = "priority" },
+]
+
+[catalog]
+poll = { max_wait_secs = 20, initial_backoff_ms = 500 }
+post_order_fill.fields = { u_cost_center = "{var.cost_center}" }   # only with --fill-ritm
+
+[audit]
+agent_write_marker = "[sncfr-agent]"
+
+[triage]
+buckets = ["sla_at_risk", "customer_replied", "unassigned", "stale", "approvals", "vip"]
+stale_after = "3d"
+sla_threshold_pct = 75
+per_bucket = 10
+custom.vip = { table = "incident", query = "caller_id.vip=true", reason = "VIP caller" }
+
+# Delete keys inherited from ootb after merging this layer.
+[remove]
+prefixes = ["CS"]
