@@ -484,3 +484,50 @@ async fn doctor_reports_absent_tables_drift_binding_and_the_capability_record() 
     );
     assert!(corp.mutating_requests().await.is_empty());
 }
+
+#[tokio::test]
+async fn table_reads_never_ask_for_counts_and_list_reads_skip_reference_links() {
+    // CT-28 (PERF-1, PERF-4)
+    let corp = ExampleCorp::start().await;
+    assert_eq!(corp.run(&["--json", "show", "INC0012345"]).code, 0);
+    assert_eq!(corp.run(&["--json", "list", "--table", "incident"]).code, 0);
+    let mut table_gets = 0;
+    for r in corp.requests().await {
+        if r.method.as_str() != "GET" || !r.url.path().starts_with("/api/now/table/") {
+            continue;
+        }
+        table_gets += 1;
+        let q: Vec<(String, String)> = r
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert!(
+            q.iter()
+                .any(|(k, v)| k == "sysparm_no_count" && v == "true"),
+            "missing sysparm_no_count on {}",
+            r.url
+        );
+    }
+    assert!(table_gets > 3, "{table_gets}");
+    let list_reads: Vec<_> = corp
+        .requests()
+        .await
+        .into_iter()
+        .filter(|r| {
+            r.url.path() == "/api/now/table/incident"
+                && r.url.query().unwrap_or_default().contains("ORDERBYDESC")
+        })
+        .collect();
+    assert!(!list_reads.is_empty());
+    for r in list_reads {
+        assert!(
+            r.url
+                .query()
+                .unwrap_or_default()
+                .contains("sysparm_exclude_reference_link=true"),
+            "{}",
+            r.url
+        );
+    }
+}

@@ -153,12 +153,39 @@ pub struct BatchGetSubRequest {
 }
 
 impl BatchGetSubRequest {
+    /// A GET sub-request; Table API URLs get the read defaults ([`table_read_defaults`]).
     pub fn new(id: impl Into<String>, url: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            url: url.into(),
+        let mut url: String = url.into();
+        if url.starts_with("/api/now/table/") {
+            for (k, v) in table_read_defaults(&url, &[]) {
+                url.push(if url.contains('?') { '&' } else { '?' });
+                url.push_str(&format!("{k}={v}"));
+            }
         }
+        Self { id: id.into(), url }
     }
+}
+
+/// Parameters every Table API read sends unless the caller set them (PERF-1, PERF-4):
+/// `sysparm_no_count=true` (counting huge tables times out; pass `sysparm_no_count=false` for a
+/// total) and `sysparm_exclude_reference_link=true` (pass `false` where reference links are
+/// needed, e.g. field-type inference).
+pub fn table_read_defaults(
+    path: &str,
+    query: &[(&str, &str)],
+) -> Vec<(&'static str, &'static str)> {
+    if !path.starts_with("/api/now/table/") {
+        return Vec::new();
+    }
+    let set = |k: &str| query.iter().any(|(q, _)| *q == k) || path.contains(&format!("{k}="));
+    let mut out = Vec::new();
+    if !set("sysparm_no_count") {
+        out.push(("sysparm_no_count", "true"));
+    }
+    if !set("sysparm_exclude_reference_link") {
+        out.push(("sysparm_exclude_reference_link", "true"));
+    }
+    out
 }
 
 #[derive(Debug, Serialize)]
@@ -548,9 +575,11 @@ impl ReadOnlyClient {
             self.auth.debug_summary()
         );
         let started = Instant::now();
+        let defaults = table_read_defaults(path, query);
         let resp = self
             .send(crate::policy::RequestKind::Read, path, || {
-                self.auth.apply(self.http.get(url.clone()).query(query))
+                self.auth
+                    .apply(self.http.get(url.clone()).query(query).query(&defaults))
             })
             .await?;
         crate::debug_log!(

@@ -141,7 +141,12 @@ pub async fn load_or_sync_table_schema(
         if let Ok(sample_resp) = client
             .get_json::<Value>(
                 &sample_path,
-                &[("sysparm_limit", "1"), ("sysparm_display_value", "all")],
+                // Reference links are how sampled fields are recognized as references (DISC-1).
+                &[
+                    ("sysparm_limit", "1"),
+                    ("sysparm_display_value", "all"),
+                    ("sysparm_exclude_reference_link", "false"),
+                ],
             )
             .await
             && let Some(first) = sample_resp
