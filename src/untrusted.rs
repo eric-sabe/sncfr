@@ -59,6 +59,17 @@ pub fn is_table_name(s: &str) -> bool {
     crate::pack::validate::is_table_name(s)
 }
 
+/// The table a reference `link` points at (DISC-1): `…/api/now/table/<t>/<id>` with `<t>`
+/// passing the table-name rule and `<id>` a record id. Anything else is `None` (left untyped).
+pub fn link_table(link: &str) -> Option<String> {
+    let (_, rest) = link.split_once("/api/now/table/")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
+    let mut parts = rest.split('/');
+    let table = parts.next()?;
+    let id = parts.next()?;
+    (parts.next().is_none() && is_table_name(table) && is_record_id(id)).then(|| table.to_string())
+}
+
 /// A 32-hex sys_id.
 pub fn is_sys_id(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -195,6 +206,23 @@ mod tests {
         }
         assert!(query_list_value("Ops, EMEA - L2").is_err());
         assert!(needs_or_chain("Ops, EMEA - L2"));
+    }
+
+    #[test]
+    fn link_tables_pass_the_table_name_rule() {
+        // DISC-1
+        let id = "0123456789abcdef0123456789abcdef";
+        let ok = format!("https://x.service-now.com/api/now/table/sys_user_group/{id}");
+        assert_eq!(link_table(&ok).as_deref(), Some("sys_user_group"));
+        for bad in [
+            format!("https://x/api/now/table/Sys-User/{id}"),
+            format!("https://x/api/now/table/../{id}"),
+            "https://x/api/now/table/sys_user".to_string(),
+            format!("https://x/api/now/table/sys_user/{id}/extra"),
+            format!("https://x/api/now/v2/other/{id}"),
+        ] {
+            assert_eq!(link_table(&bad), None, "{bad}");
+        }
     }
 
     #[test]
