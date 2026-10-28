@@ -428,3 +428,59 @@ async fn a_slow_section_times_out_alone() {
         md.stdout
     );
 }
+
+#[tokio::test]
+async fn doctor_reports_absent_tables_drift_binding_and_the_capability_record() {
+    // CT-27 (CAP-5), CT-09b doctor half, CAP-6
+    let pack = support::EXAMPLE_PACK
+        .replace(
+            "extra_probe_tables = [\"u_abc_request\"]",
+            "extra_probe_tables = [\"u_abc_request\", \"sn_customerservice_case\"]",
+        )
+        .replace(
+            "{ value = \"4\", label = \"4 - Minor\",",
+            "{ value = \"4\", label = \"4 - Minor Issue\",",
+        );
+    let corp = ExampleCorp::start_with_pack(&pack).await;
+    corp.mount(support::Scenario::ReadableChoices).await;
+    let out = corp.run(&["--json", "doctor", "--refresh"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let r = out.json();
+    let absent = r["capabilities"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|c| c["resource"] == "table:sn_customerservice_case")
+        })
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(absent["note"], "not installed", "{absent}");
+    assert_eq!(r["pack_binds_instance"], true);
+    assert!(
+        r["pack_drift"]
+            .as_array()
+            .is_some_and(
+                |d| d.iter().any(|x| x.as_str().unwrap_or_default().contains(
+                    "value 4 is \"4 - Minor Issue\" in the pack but \"4 - Minor\" on the instance"
+                ))
+            ),
+        "{}",
+        r["pack_drift"]
+    );
+    let record = r["capability_record"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let catalog = record
+        .iter()
+        .find(|c| c["capability"] == "catalog_api")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(catalog["source"], "probe", "{catalog}");
+    assert!(
+        r["pack"]["workarounds"]
+            .as_array()
+            .is_some_and(|w| !w.is_empty())
+    );
+    assert!(corp.mutating_requests().await.is_empty());
+}

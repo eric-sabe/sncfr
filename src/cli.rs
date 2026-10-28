@@ -149,11 +149,18 @@ pub enum Commands {
     Skill(SkillCommands),
 
     /// Run connectivity, TLS, Corporate SSO session, and non-admin ACL capability diagnostics
-    Doctor,
+    Doctor(DoctorArgs),
 
     /// Validate or inspect Instance Packs (ADR-0004)
     #[command(subcommand)]
     Pack(PackCommands),
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct DoctorArgs {
+    /// Forget the capability record and re-probe every capability (CAP-2, CAP-6)
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -184,7 +191,7 @@ impl Commands {
             | Self::Attach(_)
             | Self::Skill(_)
             | Self::Pack(_)
-            | Self::Doctor => CommandOutputShape::Dossier,
+            | Self::Doctor(_) => CommandOutputShape::Dossier,
             Self::List(_)
             | Self::Search(_)
             | Self::Stats(_)
