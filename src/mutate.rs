@@ -1,17 +1,18 @@
 use crate::auth::resolve_current_identity;
 use crate::cache::InstanceCache;
 use crate::cli::{AttachArgs, CommentArgs, CreateArgs, UpdateArgs};
+use crate::client::write_gate::{ResolvedField, Target, VerifiedMutation, WriteOutcome};
 use crate::client::{
     ReadOnlyClient, WritePermit, extract_field_display, extract_field_pair, extract_field_value,
 };
 use crate::error::SncfrError;
 use crate::output::{ResolvedOutputFormat, osc8_link};
 use crate::resolve::{is_sys_id, load_or_sync_prefixes, resolve_table_name, resolve_ticket};
-use crate::resolve_value::{ResolveCtx, resolve_choice, resolve_field};
+use crate::resolve_value::{ResolveCtx, ResolvedValue, resolve_choice, resolve_field};
 use crate::schema::load_or_sync_table_schema;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
@@ -37,18 +38,7 @@ pub struct FieldDiff {
     pub unverifiable: Option<UnverifiableField>,
 }
 
-/// A value that could not be confirmed against an active pack or instance metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnverifiableField {
-    pub field: String,
-    pub input: String,
-    pub would_send: String,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suggested: Option<String>,
-}
+pub use crate::client::write_gate::UnverifiableField;
 
 impl FieldDiff {
     /// A diff row for a resolved value, carrying its source and verification status.
@@ -66,18 +56,7 @@ impl FieldDiff {
             after_value: resolved.value().to_string(),
             source: Some(resolved.source_label()),
             status: Some(resolved.status_label()),
-            unverifiable: resolved.unverifiable().map(|reason| UnverifiableField {
-                field: field.to_string(),
-                input: input.to_string(),
-                would_send: resolved.value().to_string(),
-                reason: reason.as_str().to_string(),
-                candidates: resolved
-                    .candidates()
-                    .iter()
-                    .map(|(v, l)| format!("{l} ({v})"))
-                    .collect(),
-                suggested: resolved.suggested().map(str::to_string),
-            }),
+            unverifiable: UnverifiableField::from_resolved(field, input, resolved),
         }
     }
 }
@@ -92,9 +71,9 @@ pub struct AttachmentMutationItem {
     pub attachment_sys_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationReport {
-    /// `"dry_run"` or `"committed"`.
+    /// `"dry_run"`, `"blocked"` (`--write` refused: unverifiable values), or `"committed"`.
     pub mode: String,
     /// `"comment"`, `"note"`, `"update"`, `"create"`, or `"attach"`.
     pub operation: String,
@@ -111,6 +90,145 @@ pub struct MutationReport {
     pub attachments: Vec<AttachmentMutationItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_command: Option<String>,
+    /// Values that could not be verified and were not allowed: the command exits 8 (SAFE-3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverifiable_fields: Vec<UnverifiableField>,
+    /// Unverifiable fields named in `--allow-unverified` (sent exactly as typed) (SAFE-4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_unverified: Vec<String>,
+    /// `--allow-unverified` names that weren't unverifiable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_unverified_unused: Vec<String>,
+    /// Fields the instance returned with a different value than sent: the command exits 9.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applied: Vec<crate::client::write_gate::NotApplied>,
+    /// Fields absent from the write response (not confirmed, not refuted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unconfirmed: Vec<String>,
+    /// Merged Instance Pack headline (`<name> <version> · <status> · sha256:…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+}
+
+/// What the write gate did for one invocation.
+pub(crate) struct GateRun {
+    /// `dry_run`, `blocked`, or `committed`.
+    pub mode: &'static str,
+    pub outcomes: Vec<WriteOutcome>,
+    pub blocking: Vec<UnverifiableField>,
+    pub allowed: Vec<String>,
+    pub unused: Vec<String>,
+}
+
+/// Runs prepared mutations through the gate: a dry-run only checks them; `--write` authorizes
+/// all of them before sending the first (NA-2), then sends each.
+pub(crate) async fn run_gate(
+    client: ReadOnlyClient,
+    permit: Option<WritePermit>,
+    mutations: Vec<VerifiedMutation>,
+) -> Result<GateRun, SncfrError> {
+    let allow = crate::client::write_gate::allow_list();
+    let all: Vec<UnverifiableField> = mutations
+        .iter()
+        .flat_map(|m| m.unverifiable().to_vec())
+        .collect();
+    let blocking: Vec<UnverifiableField> =
+        mutations.iter().flat_map(|m| m.blocking(allow)).collect();
+    let allowed: Vec<String> = all
+        .iter()
+        .filter(|u| allow.contains(&u.field))
+        .map(|u| u.field.clone())
+        .collect();
+    let unused: Vec<String> = allow
+        .names()
+        .filter(|n| !all.iter().any(|u| u.field.eq_ignore_ascii_case(n)))
+        .cloned()
+        .collect();
+    let Some(permit) = permit else {
+        return Ok(GateRun {
+            mode: "dry_run",
+            outcomes: Vec::new(),
+            blocking,
+            allowed,
+            unused,
+        });
+    };
+    if !blocking.is_empty() {
+        return Ok(GateRun {
+            mode: "blocked",
+            outcomes: Vec::new(),
+            blocking,
+            allowed,
+            unused,
+        });
+    }
+    let mutating = client.into_mutating(permit);
+    let payloads = mutating.authorize(mutations, allow)?;
+    let mut outcomes = Vec::with_capacity(payloads.len());
+    for p in payloads {
+        outcomes.push(mutating.send(p).await?);
+    }
+    Ok(GateRun {
+        mode: "committed",
+        outcomes,
+        blocking,
+        allowed,
+        unused,
+    })
+}
+
+impl GateRun {
+    /// Fills the gate results into `report` and marks allowed rows in its diffs.
+    pub(crate) fn fill(&self, report: &mut MutationReport) {
+        report.mode = self.mode.to_string();
+        report.unverifiable_fields.clone_from(&self.blocking);
+        report.allowed_unverified.clone_from(&self.allowed);
+        report.allowed_unverified_unused.clone_from(&self.unused);
+        report.not_applied = self
+            .outcomes
+            .iter()
+            .flat_map(|o| o.not_applied.clone())
+            .collect();
+        report.unconfirmed = self
+            .outcomes
+            .iter()
+            .flat_map(|o| o.unconfirmed.clone())
+            .collect();
+        report.pack = Some(crate::pack::active().summary().headline());
+        for d in &mut report.diffs {
+            if let Some(u) = &d.unverifiable
+                && self.allowed.iter().any(|a| a == &d.field)
+            {
+                d.status = Some(format!("allowed unverified ({})", u.reason));
+            }
+        }
+        if self.mode == "committed" {
+            report.commit_command = None;
+        }
+    }
+
+    /// The first write's response record (`result`), when there was one.
+    pub(crate) fn first_record(&self) -> Option<&Value> {
+        self.outcomes
+            .first()
+            .map(|o| o.response.get("result").unwrap_or(&o.response))
+    }
+}
+
+/// The exit status a report implies: 8 when values were left unverifiable, 9 when the instance
+/// silently didn't apply fields, otherwise success. `main` prints the report either way.
+pub fn report_error(report: &MutationReport) -> Option<SncfrError> {
+    if !report.unverifiable_fields.is_empty() {
+        return Some(SncfrError::Unverifiable {
+            fields: report.unverifiable_fields.clone(),
+        });
+    }
+    if !report.not_applied.is_empty() {
+        return Some(SncfrError::WriteNotApplied {
+            not_applied: report.not_applied.clone(),
+        });
+    }
+    None
 }
 
 /// Executes `sncfr comment` (`is_work_note = false`) or `sncfr note` (`is_work_note = true`).
@@ -142,55 +260,46 @@ pub async fn execute_comment_or_note(
         before_value: None,
         after_display: body_text.clone(),
         after_value: body_text.clone(),
+        source: Some("input".to_string()),
+        status: Some("n/a (free text)".to_string()),
         ..Default::default()
     };
+    let fields: Vec<ResolvedField> = vec![(
+        field_name.to_string(),
+        body_text.clone(),
+        ResolvedValue::text(&body_text),
+    )];
+    let mutation = VerifiedMutation::record(
+        Target::patch_record(&resolved.table, &resolved.sys_id)?,
+        &fields,
+    );
 
-    if let Some(write_permit) = permit {
-        let mutating = client.into_mutating(write_permit);
-        let mut payload = Map::new();
-        payload.insert(field_name.to_string(), Value::String(body_text));
-        let path = format!("/api/now/table/{}/{}", resolved.table, resolved.sys_id);
-        let _: Value = mutating
-            .patch_json(&path, &[("sysparm_display_value", "all")], &payload)
-            .await?;
-
-        Ok(MutationReport {
-            mode: "committed".to_string(),
-            operation: op_name.to_string(),
-            ticket: Some(resolved.number),
-            table: resolved.table,
-            sys_id: Some(resolved.sys_id),
-            ui_url: Some(ui_url),
-            diffs: vec![diff],
-            attachments: vec![],
-            commit_command: None,
-        })
+    let commit_cmd = if let Some(file) = &args.file {
+        format!(
+            "sncfr {op_name} {} --file {} --write",
+            shell_quote(&resolved.number),
+            shell_quote(&file.display().to_string())
+        )
     } else {
-        let commit_cmd = if let Some(file) = &args.file {
-            format!(
-                "sncfr {op_name} {} --file {} --write",
-                shell_quote(&resolved.number),
-                shell_quote(&file.display().to_string())
-            )
-        } else {
-            format!(
-                "sncfr {op_name} {} {} --write",
-                shell_quote(&resolved.number),
-                shell_quote(&body_text)
-            )
-        };
-        Ok(MutationReport {
-            mode: "dry_run".to_string(),
-            operation: op_name.to_string(),
-            ticket: Some(resolved.number),
-            table: resolved.table,
-            sys_id: Some(resolved.sys_id),
-            ui_url: Some(ui_url),
-            diffs: vec![diff],
-            attachments: vec![],
-            commit_command: Some(commit_cmd),
-        })
-    }
+        format!(
+            "sncfr {op_name} {} {} --write",
+            shell_quote(&resolved.number),
+            shell_quote(&body_text)
+        )
+    };
+    let gate = run_gate(client, permit, vec![mutation]).await?;
+    let mut report = MutationReport {
+        operation: op_name.to_string(),
+        ticket: Some(resolved.number),
+        table: resolved.table,
+        sys_id: Some(resolved.sys_id),
+        ui_url: Some(ui_url),
+        diffs: vec![diff],
+        commit_command: Some(commit_cmd),
+        ..Default::default()
+    };
+    gate.fill(&mut report);
+    Ok(report)
 }
 
 /// Executes `sncfr update <TICKET> [flags] [--write]`.
@@ -216,7 +325,7 @@ pub async fn execute_update(
         discovered: None,
     };
     let mut diffs = Vec::new();
-    let mut payload = Map::new();
+    let mut fields: Vec<ResolvedField> = Vec::new();
 
     // 1. Choice fields (`state`, `priority`, `urgency`, `impact`, `close_code`)
     for (field, opt_val) in [
@@ -230,7 +339,7 @@ pub async fn execute_update(
             let value = resolve_choice(&ctx, field, input_val)?;
             let before = extract_field_pair(&resolved.record, field);
             diffs.push(FieldDiff::from_resolved(field, before, input_val, &value));
-            payload.insert(field.to_string(), Value::String(value.value().to_string()));
+            fields.push((field.to_string(), input_val.clone(), value));
         }
     }
 
@@ -242,11 +351,17 @@ pub async fn execute_update(
             field: "assigned_to".to_string(),
             before_display: before.as_ref().map(|b| b.0.clone()),
             before_value: before.as_ref().map(|b| b.1.clone()),
-            after_display: after_disp,
+            after_display: after_disp.clone(),
             after_value: after_val.clone(),
+            source: Some("user".to_string()),
+            status: Some("verified".to_string()),
             ..Default::default()
         });
-        payload.insert("assigned_to".to_string(), Value::String(after_val));
+        fields.push((
+            "assigned_to".to_string(),
+            assign_to.clone(),
+            ResolvedValue::verified(after_val, Some(after_disp), None),
+        ));
     }
 
     if let Some(group) = &args.group {
@@ -256,11 +371,17 @@ pub async fn execute_update(
             field: "assignment_group".to_string(),
             before_display: before.as_ref().map(|b| b.0.clone()),
             before_value: before.as_ref().map(|b| b.1.clone()),
-            after_display: after_disp,
+            after_display: after_disp.clone(),
             after_value: after_val.clone(),
+            source: Some("group".to_string()),
+            status: Some("verified".to_string()),
             ..Default::default()
         });
-        payload.insert("assignment_group".to_string(), Value::String(after_val));
+        fields.push((
+            "assignment_group".to_string(),
+            group.clone(),
+            ResolvedValue::verified(after_val, Some(after_disp), None),
+        ));
     }
 
     // 3. Text fields (`short_description`, `description`, `close_notes`, `work_notes`, `comments`)
@@ -287,7 +408,7 @@ pub async fn execute_update(
                 status: Some("n/a (free text)".to_string()),
                 ..Default::default()
             });
-            payload.insert(field.to_string(), Value::String(val.clone()));
+            fields.push((field.to_string(), val.clone(), ResolvedValue::text(val)));
         }
     }
 
@@ -297,10 +418,10 @@ pub async fn execute_update(
         let value = resolve_field(&ctx, &k, &v)?;
         let before = extract_field_pair(&resolved.record, &k);
         diffs.push(FieldDiff::from_resolved(&k, before, &v, &value));
-        payload.insert(k, Value::String(value.value().to_string()));
+        fields.push((k, v, value));
     }
 
-    if payload.is_empty() {
+    if fields.is_empty() {
         return Err(SncfrError::InvalidArgs {
             message: "No field updates were specified for `sncfr update`".to_string(),
             remediation: Some(
@@ -310,40 +431,25 @@ pub async fn execute_update(
         });
     }
 
-    if let Some(write_permit) = permit {
-        let mutating = client.into_mutating(write_permit);
-        let path = format!("/api/now/table/{}/{}", resolved.table, resolved.sys_id);
-        let _: Value = mutating
-            .patch_json(&path, &[("sysparm_display_value", "all")], &payload)
-            .await?;
-
-        Ok(MutationReport {
-            mode: "committed".to_string(),
-            operation: "update".to_string(),
-            ticket: Some(resolved.number),
-            table: resolved.table,
-            sys_id: Some(resolved.sys_id),
-            ui_url: Some(ui_url),
-            diffs,
-            attachments: vec![],
-            commit_command: None,
-        })
-    } else {
-        Ok(MutationReport {
-            mode: "dry_run".to_string(),
-            operation: "update".to_string(),
-            ticket: Some(resolved.number.clone()),
-            table: resolved.table,
-            sys_id: Some(resolved.sys_id),
-            ui_url: Some(ui_url),
-            diffs,
-            attachments: vec![],
-            commit_command: Some(build_update_commit_command(&resolved.number, args)),
-        })
-    }
+    let mutation = VerifiedMutation::record(
+        Target::patch_record(&resolved.table, &resolved.sys_id)?,
+        &fields,
+    );
+    let gate = run_gate(client, permit, vec![mutation]).await?;
+    let mut report = MutationReport {
+        operation: "update".to_string(),
+        ticket: Some(resolved.number.clone()),
+        table: resolved.table,
+        sys_id: Some(resolved.sys_id),
+        ui_url: Some(ui_url),
+        diffs,
+        commit_command: Some(build_update_commit_command(&resolved.number, args)),
+        ..Default::default()
+    };
+    gate.fill(&mut report);
+    Ok(report)
 }
 
-/// Executes `sncfr create <table|prefix> [flags] [--write]`.
 pub async fn execute_create(
     client: ReadOnlyClient,
     cache: &InstanceCache,
@@ -362,7 +468,7 @@ pub async fn execute_create(
     };
 
     let mut diffs = Vec::new();
-    let mut payload = Map::new();
+    let mut fields: Vec<ResolvedField> = Vec::new();
 
     diffs.push(FieldDiff {
         field: "short_description".to_string(),
@@ -370,12 +476,15 @@ pub async fn execute_create(
         before_value: None,
         after_display: args.short_description.clone(),
         after_value: args.short_description.clone(),
+        source: Some("input".to_string()),
+        status: Some("n/a (free text)".to_string()),
         ..Default::default()
     });
-    payload.insert(
+    fields.push((
         "short_description".to_string(),
-        Value::String(args.short_description.clone()),
-    );
+        args.short_description.clone(),
+        ResolvedValue::text(&args.short_description),
+    ));
 
     if let Some(desc) = &args.description {
         diffs.push(FieldDiff {
@@ -384,9 +493,15 @@ pub async fn execute_create(
             before_value: None,
             after_display: desc.clone(),
             after_value: desc.clone(),
+            source: Some("input".to_string()),
+            status: Some("n/a (free text)".to_string()),
             ..Default::default()
         });
-        payload.insert("description".to_string(), Value::String(desc.clone()));
+        fields.push((
+            "description".to_string(),
+            desc.clone(),
+            ResolvedValue::text(desc),
+        ));
     }
 
     for (field, opt_val) in [
@@ -397,7 +512,7 @@ pub async fn execute_create(
         if let Some(input_val) = opt_val {
             let value = resolve_choice(&ctx, field, input_val)?;
             diffs.push(FieldDiff::from_resolved(field, None, input_val, &value));
-            payload.insert(field.to_string(), Value::String(value.value().to_string()));
+            fields.push((field.to_string(), input_val.clone(), value));
         }
     }
 
@@ -407,11 +522,17 @@ pub async fn execute_create(
             field: "assigned_to".to_string(),
             before_display: None,
             before_value: None,
-            after_display: after_disp,
+            after_display: after_disp.clone(),
             after_value: after_val.clone(),
+            source: Some("user".to_string()),
+            status: Some("verified".to_string()),
             ..Default::default()
         });
-        payload.insert("assigned_to".to_string(), Value::String(after_val));
+        fields.push((
+            "assigned_to".to_string(),
+            assign_to.clone(),
+            ResolvedValue::verified(after_val, Some(after_disp), None),
+        ));
     }
 
     if let Some(group) = &args.group {
@@ -420,11 +541,17 @@ pub async fn execute_create(
             field: "assignment_group".to_string(),
             before_display: None,
             before_value: None,
-            after_display: after_disp,
+            after_display: after_disp.clone(),
             after_value: after_val.clone(),
+            source: Some("group".to_string()),
+            status: Some("verified".to_string()),
             ..Default::default()
         });
-        payload.insert("assignment_group".to_string(), Value::String(after_val));
+        fields.push((
+            "assignment_group".to_string(),
+            group.clone(),
+            ResolvedValue::verified(after_val, Some(after_disp), None),
+        ));
     }
 
     if let Some(caller) = &args.caller {
@@ -434,59 +561,48 @@ pub async fn execute_create(
             field: caller_field.to_string(),
             before_display: None,
             before_value: None,
-            after_display: after_disp,
+            after_display: after_disp.clone(),
             after_value: after_val.clone(),
+            source: Some("user".to_string()),
+            status: Some("verified".to_string()),
             ..Default::default()
         });
-        payload.insert(caller_field.to_string(), Value::String(after_val));
+        fields.push((
+            caller_field.to_string(),
+            caller.clone(),
+            ResolvedValue::verified(after_val, Some(after_disp), None),
+        ));
     }
 
     for kv in &args.set_fields {
         let (k, v) = parse_key_value_pair(kv)?;
         let value = resolve_field(&ctx, &k, &v)?;
         diffs.push(FieldDiff::from_resolved(&k, None, &v, &value));
-        payload.insert(k, Value::String(value.value().to_string()));
+        fields.push((k, v, value));
     }
 
     let base_url = client.base_url().as_str().trim_end_matches('/').to_string();
 
-    if let Some(write_permit) = permit {
-        let mutating = client.into_mutating(write_permit);
-        let path = format!("/api/now/table/{table}");
-        let resp: Value = mutating
-            .post_json(&path, &[("sysparm_display_value", "all")], &payload)
-            .await?;
-        let created = resp.get("result").unwrap_or(&resp);
-        let sys_id = extract_field_value(created, "sys_id");
-        let number = extract_field_display(created, "number");
-        let ui_url = sys_id
-            .as_ref()
-            .map(|id| format!("{base_url}/nav_to.do?uri={table}.do?sys_id={id}"));
-
-        Ok(MutationReport {
-            mode: "committed".to_string(),
-            operation: "create".to_string(),
-            ticket: number,
-            table,
-            sys_id,
-            ui_url,
-            diffs,
-            attachments: vec![],
-            commit_command: None,
-        })
-    } else {
-        Ok(MutationReport {
-            mode: "dry_run".to_string(),
-            operation: "create".to_string(),
-            ticket: None,
-            table: table.clone(),
-            sys_id: None,
-            ui_url: None,
-            diffs,
-            attachments: vec![],
-            commit_command: Some(build_create_commit_command(&table, args)),
-        })
-    }
+    let mutation = VerifiedMutation::record(Target::post_table(&table)?, &fields);
+    let gate = run_gate(client, permit, vec![mutation]).await?;
+    let created = gate.first_record();
+    let sys_id = created.and_then(|r| extract_field_value(r, "sys_id"));
+    let number = created.and_then(|r| extract_field_display(r, "number"));
+    let ui_url = sys_id
+        .as_ref()
+        .map(|id| format!("{base_url}/nav_to.do?uri={table}.do?sys_id={id}"));
+    let mut report = MutationReport {
+        operation: "create".to_string(),
+        ticket: number,
+        table: table.clone(),
+        sys_id,
+        ui_url,
+        diffs,
+        commit_command: Some(build_create_commit_command(&table, args)),
+        ..Default::default()
+    };
+    gate.fill(&mut report);
+    Ok(report)
 }
 
 /// Executes `sncfr attach <TICKET> <FILE_PATH>... [--write]`.
@@ -530,69 +646,43 @@ pub async fn execute_attach(
         ));
     }
 
-    if let Some(write_permit) = permit {
-        let mutating = client.into_mutating(write_permit);
-        let mut items = Vec::with_capacity(prepared_files.len());
-        for (file_name, local_path, content_type, bytes) in prepared_files {
-            let size_bytes = bytes.len();
-            let resp: Value = mutating
-                .upload_attachment(
-                    &resolved.table,
-                    &resolved.sys_id,
-                    &file_name,
-                    &content_type,
-                    bytes,
-                )
-                .await?;
-            let att_sys_id = resp
-                .get("result")
-                .and_then(|r| extract_field_value(r, "sys_id"));
-            items.push(AttachmentMutationItem {
-                file_name,
-                local_path,
-                content_type,
-                size_bytes,
-                attachment_sys_id: att_sys_id,
-            });
-        }
-
-        Ok(MutationReport {
-            mode: "committed".to_string(),
-            operation: "attach".to_string(),
-            ticket: Some(resolved.number),
-            table: resolved.table,
-            sys_id: Some(resolved.sys_id),
-            ui_url: Some(ui_url),
-            diffs: vec![],
-            attachments: items,
-            commit_command: None,
-        })
-    } else {
-        let items: Vec<AttachmentMutationItem> = prepared_files
-            .into_iter()
-            .map(
-                |(file_name, local_path, content_type, bytes)| AttachmentMutationItem {
-                    file_name,
-                    local_path,
-                    content_type,
-                    size_bytes: bytes.len(),
-                    attachment_sys_id: None,
-                },
-            )
-            .collect();
-
-        Ok(MutationReport {
-            mode: "dry_run".to_string(),
-            operation: "attach".to_string(),
-            ticket: Some(resolved.number.clone()),
-            table: resolved.table,
-            sys_id: Some(resolved.sys_id),
-            ui_url: Some(ui_url),
-            diffs: vec![],
-            attachments: items,
-            commit_command: Some(build_attach_commit_command(&resolved.number, args)),
-        })
+    let mut items = Vec::with_capacity(prepared_files.len());
+    let mut mutations = Vec::with_capacity(prepared_files.len());
+    for (file_name, local_path, content_type, bytes) in prepared_files {
+        items.push(AttachmentMutationItem {
+            file_name: file_name.clone(),
+            local_path,
+            content_type: content_type.clone(),
+            size_bytes: bytes.len(),
+            attachment_sys_id: None,
+        });
+        mutations.push(VerifiedMutation::attachment(
+            &resolved.table,
+            &resolved.sys_id,
+            &file_name,
+            &content_type,
+            bytes,
+        )?);
     }
+    let gate = run_gate(client, permit, mutations).await?;
+    for (item, outcome) in items.iter_mut().zip(&gate.outcomes) {
+        item.attachment_sys_id = outcome
+            .response
+            .get("result")
+            .and_then(|r| extract_field_value(r, "sys_id"));
+    }
+    let mut report = MutationReport {
+        operation: "attach".to_string(),
+        ticket: Some(resolved.number.clone()),
+        table: resolved.table,
+        sys_id: Some(resolved.sys_id),
+        ui_url: Some(ui_url),
+        attachments: items,
+        commit_command: Some(build_attach_commit_command(&resolved.number, args)),
+        ..Default::default()
+    };
+    gate.fill(&mut report);
+    Ok(report)
 }
 
 pub async fn resolve_user_reference(
@@ -935,10 +1025,15 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
                 out.push('\n');
             }
 
+            out.push_str(&gate_notes(report, false));
             if let Some(cmd) = &report.commit_command {
-                out.push_str(&format!(
-                    "> To commit this change to ServiceNow, re-run with `--write`:\n> `{cmd}`\n"
-                ));
+                if report.unverifiable_fields.is_empty() {
+                    out.push_str(&format!(
+                        "> To commit this change to ServiceNow, re-run with `--write`:\n> `{cmd}`\n"
+                    ));
+                } else {
+                    out.push_str(&format!("> Commit (blocked until resolved): `{cmd}`\n"));
+                }
             }
             out
         }
@@ -1006,14 +1101,86 @@ pub fn format_mutation_report(report: &MutationReport, format: ResolvedOutputFor
                 }
             }
 
+            out.push_str(&gate_notes(report, true));
             if let Some(cmd) = &report.commit_command {
-                out.push_str(&format!(
-                    "\nTo commit this change, pass `--write`:\n  {cmd}\n"
-                ));
+                if report.unverifiable_fields.is_empty() {
+                    out.push_str(&format!(
+                        "\nTo commit this change, pass `--write`:\n  {cmd}\n"
+                    ));
+                } else {
+                    out.push_str(&format!("\nCommit (blocked until resolved):\n  {cmd}\n"));
+                }
             }
             out
         }
     }
+}
+
+/// The pack footer, the "not written" block for unverifiable values, and post-write findings.
+fn gate_notes(report: &MutationReport, terminal: bool) -> String {
+    let clean = |s: &str| {
+        if terminal {
+            crate::untrusted::clean(s)
+        } else {
+            crate::untrusted::inline(s)
+        }
+    };
+    let mut out = String::new();
+    if let Some(pack) = &report.pack {
+        out.push_str(&format!("\nPack: {}\n", clean(pack)));
+    }
+    if !report.unverifiable_fields.is_empty() {
+        out.push_str(&format!(
+            "\n⚠ Not written: {} field{} could not be verified (exit 8).\n",
+            report.unverifiable_fields.len(),
+            if report.unverifiable_fields.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+        for u in &report.unverifiable_fields {
+            let known = if u.candidates.is_empty() {
+                "no known values for this field".to_string()
+            } else {
+                format!("known values: {}", clean(&u.candidates.join(", ")))
+            };
+            out.push_str(&format!(
+                "  {}: would send the literal value \"{}\" ({}); {known}.\n",
+                clean(&u.field),
+                clean(&u.would_send),
+                u.reason
+            ));
+            if let Some(s) = &u.suggested {
+                out.push_str(&format!("    suggestion: use `{}` instead.\n", clean(s)));
+            }
+        }
+        out.push_str("  Ask the user. Only if they confirm a literal value, re-run with --allow-unverified <field>.\n");
+    }
+    if !report.allowed_unverified.is_empty() {
+        out.push_str(&format!(
+            "\nSent as typed (--allow-unverified): {}\n",
+            clean(&report.allowed_unverified.join(", "))
+        ));
+    }
+    if !report.not_applied.is_empty() {
+        out.push_str("\n⚠ The record was partly updated (exit 9). The instance did not apply:\n");
+        for n in &report.not_applied {
+            out.push_str(&format!(
+                "  {}: sent \"{}\", instance has \"{}\"\n",
+                clean(&n.field),
+                clean(&n.sent),
+                clean(&n.returned)
+            ));
+        }
+    }
+    if !report.unconfirmed.is_empty() {
+        out.push_str(&format!(
+            "\nNot confirmed by the response: {}\n",
+            clean(&report.unconfirmed.join(", "))
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1164,6 +1331,7 @@ mod tests {
             }],
             attachments: vec![],
             commit_command: None,
+            ..Default::default()
         };
         for format in [
             ResolvedOutputFormat::Table,

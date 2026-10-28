@@ -1244,7 +1244,7 @@ Any assertion change is a BF-TEST-3 violation.
 | CT-09b | Row 9 (pack conflict) | exit 8 `pack_conflict`; `doctor` lists the drift | `tests/brownfield.rs` |
 | CT-10 | `--set u_tier=gold --write`, no pack, dictionary `[]`, sample shows `u_tier` with display = value | exit 8 `unknown_field_type`, zero PATCH (NA-2, BF-TEST-2b) | `tests/brownfield.rs` |
 | CT-10b | Same with the Example Corp pack, stats returns `silver`, `bronze` | exit 8 `not_seen`, candidates listed, zero PATCH | `tests/brownfield.rs` |
-| CT-10c | `update --set u_tier=gold --attach f --write`, unverifiable | exit 8, zero PATCH, zero POST `/attachment` (NA-2) | `tests/brownfield.rs` |
+| CT-10c | A multi-request command with one unverifiable value | exit 8, zero requests of any kind (NA-2). `update` has no `--attach`, so in 0.2.0 this is exercised by `catalog order --fill-ritm` (CT-40b); `MutatingClient::authorize` takes every mutation of an invocation at once | `tests/brownfield.rs` |
 | CT-11 | CT-10 + `--allow-unverified u_tier` | one PATCH with `u_tier=gold`; output echoes `allowed_unverified` | `tests/brownfield.rs` |
 | CT-11b | `--allow-unverified '*'` | exit 2 | `src/write_gate.rs` |
 | CT-12 | Read-only lock + unverifiable | exit 6 (precedence) | `src/write_gate.rs` |

@@ -19,6 +19,7 @@ pub mod schema;
 pub mod skill;
 pub mod untrusted;
 pub mod workflows;
+pub use client::write_gate;
 
 use crate::cli::Cli;
 use crate::client::WritePermit;

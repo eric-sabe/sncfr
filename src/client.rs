@@ -686,6 +686,10 @@ impl ReadOnlyClient {
 ///
 /// Can only be constructed by presenting a [`WritePermit`]. Exposes `POST`, `PATCH`, and
 /// attachment upload operations. Intentionally exposes **no `DELETE` operations**.
+/// The write gate (`src/write_gate.rs`): the only public way to send a mutating request.
+#[path = "write_gate.rs"]
+pub mod write_gate;
+
 #[derive(Debug)]
 pub struct MutatingClient {
     read_only: ReadOnlyClient,
@@ -707,7 +711,7 @@ impl MutatingClient {
     }
 
     /// Sends an authenticated `POST` request with a JSON payload (e.g., creating a ticket or catalog order).
-    pub async fn post_json<B: Serialize, T: DeserializeOwned>(
+    async fn post_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
@@ -726,7 +730,7 @@ impl MutatingClient {
     }
 
     /// Sends an authenticated `PATCH` request with a JSON payload (e.g., updating ticket fields, comments, or work notes).
-    pub async fn patch_json<B: Serialize, T: DeserializeOwned>(
+    async fn patch_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
@@ -745,7 +749,7 @@ impl MutatingClient {
     }
 
     /// Uploads a binary attachment to a ticket record via `POST /api/now/attachment/file`.
-    pub async fn upload_attachment<T: DeserializeOwned>(
+    async fn upload_attachment<T: DeserializeOwned>(
         &self,
         table_name: &str,
         table_sys_id: &str,
