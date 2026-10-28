@@ -61,8 +61,13 @@ pub struct CachedGroup {
 /// Cached `sys_number` prefix-to-table mappings (`~/.cache/sncfr/<instance>/prefixes.json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachedPrefixes {
-    /// Uppercase ticket prefix (e.g., `"INC"`) -> table name (e.g., `"incident"`).
+    /// Uppercase ticket prefix (e.g., `"INC"`) -> table name (e.g., `"incident"`). On disk this
+    /// is what `sys_number` returned; in memory it is the effective map (see
+    /// `resolve::effective_prefixes`).
     pub prefixes: BTreeMap<String, String>,
+    /// Prefixes learned from the `task` fallback (ID-3). Kept across `sys_number` resyncs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub learned: BTreeMap<String, String>,
 }
 
 /// Cached table dictionary and choice options (`~/.cache/sncfr/<instance>/schemas/<table>.json`).
