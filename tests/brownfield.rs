@@ -590,3 +590,23 @@ async fn journal_queries_carry_the_table_name_for_the_index() {
         );
     }
 }
+
+#[tokio::test]
+async fn hyphenated_ticket_numbers_resolve_and_keep_their_separator() {
+    // CT-33 (ID-2)
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&["--json", "show", "abc-1234567"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["table"], "u_abc_request");
+    let sent: Vec<String> = corp
+        .queries_to("/api/now/table/u_abc_request")
+        .await
+        .iter()
+        .filter_map(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .find(|(k, _)| k == "sysparm_query")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect();
+    assert!(sent.iter().any(|q| q == "number=ABC-1234567"), "{sent:?}");
+}

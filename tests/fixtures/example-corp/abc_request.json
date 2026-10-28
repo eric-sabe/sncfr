@@ -1,0 +1,9 @@
+{
+  "result": [{
+    "sys_id": { "value": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0", "display_value": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" },
+    "number": { "value": "ABC-1234567", "display_value": "ABC-1234567" },
+    "sys_class_name": { "value": "u_abc_request", "display_value": "ABC Request" },
+    "short_description": { "value": "Badge access for a new Example Corp hire", "display_value": "Badge access for a new Example Corp hire" },
+    "u_tier": { "value": "gold", "display_value": "Gold" }
+  }]
+}
