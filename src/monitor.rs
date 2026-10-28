@@ -30,6 +30,9 @@ pub struct StatsEnvelope {
     pub query: String,
     pub total_count: u64,
     pub buckets: Vec<StatsBucket>,
+    /// Filter values sent as typed because they could not be verified (Q-1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified_filters: Vec<crate::resolve_value::UnverifiedFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +61,9 @@ pub struct FeedEnvelope {
     #[serde(default)]
     pub degraded_inline_fallback: bool,
     pub items: Vec<FeedTicketItem>,
+    /// Filter values sent as typed because they could not be verified (Q-1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified_filters: Vec<crate::resolve_value::UnverifiedFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +95,8 @@ pub async fn execute_stats(
         Some(v) => Some(profile.resolve_saved_view(v)?),
         None => None,
     };
-    let (table, eq) = compile_table_and_query(client, cache, &args.filters, saved_view).await?;
+    let (table, eq, unverified_filters) =
+        compile_table_and_query(client, cache, &args.filters, saved_view).await?;
     let query_str = eq.build();
     let group_field = args.by.field_name();
 
@@ -161,6 +168,7 @@ pub async fn execute_stats(
         query: query_str,
         total_count,
         buckets,
+        unverified_filters,
     })
 }
 
@@ -179,7 +187,8 @@ pub async fn execute_feed(
     let since_dt = parse_since_to_utc(&args.since, now)?;
     let since_gmt = format_servicenow_gmt(since_dt);
 
-    let (table, mut eq) = compile_table_and_query(client, cache, &args.filters, saved_view).await?;
+    let (table, mut eq, unverified_filters) =
+        compile_table_and_query(client, cache, &args.filters, saved_view).await?;
     if args.filters.updated_since.is_none() {
         eq.gte("sys_updated_on", &since_gmt);
     }
@@ -318,6 +327,7 @@ pub async fn execute_feed(
         count: items.len(),
         degraded_inline_fallback,
         items,
+        unverified_filters,
     })
 }
 
@@ -435,7 +445,14 @@ async fn compile_table_and_query(
     cache: &InstanceCache,
     filters: &ListFilterArgs,
     saved_view: Option<&SavedView>,
-) -> Result<(String, crate::query::EncodedQuery), SncfrError> {
+) -> Result<
+    (
+        String,
+        crate::query::EncodedQuery,
+        Vec<crate::resolve_value::UnverifiedFilter>,
+    ),
+    SncfrError,
+> {
     let needs_identity = filters.mine
         || filters
             .assigned_to
@@ -460,11 +477,16 @@ async fn compile_table_and_query(
         cache.read_identity().ok().flatten()
     };
 
-    let (compiled_table, eq) =
+    let (compiled_table, _) =
         compile_list_filters(filters, saved_view, identity.as_ref(), Utc::now())?;
     let prefixes = load_or_sync_prefixes(client, cache, false).await?;
     let table = resolve_table_name(&compiled_table, &prefixes);
-    Ok((table, eq))
+    // Q-1: --state / --priority resolve against the target table before the query is built.
+    let (resolved_filters, unverified) =
+        crate::resolve_value::resolve_read_filters(client, cache, &table, filters).await?;
+    let (_, eq) =
+        compile_list_filters(&resolved_filters, saved_view, identity.as_ref(), Utc::now())?;
+    Ok((table, eq, unverified))
 }
 
 pub fn format_stats(env: &StatsEnvelope, format: ResolvedOutputFormat) -> String {
@@ -473,6 +495,11 @@ pub fn format_stats(env: &StatsEnvelope, format: ResolvedOutputFormat) -> String
         ResolvedOutputFormat::Yaml => serde_yaml::to_string(env).unwrap_or_default(),
         ResolvedOutputFormat::Md => {
             let mut out = String::new();
+            out.push_str(&crate::resolve_value::unverified_filter_notes(
+                &env.table,
+                &env.unverified_filters,
+                false,
+            ));
             out.push_str(&format!(
                 "# Stats: `{}` grouped by `{}` (Total: {})\n\n",
                 env.table, env.group_by, env.total_count
@@ -517,6 +544,11 @@ pub fn format_feed(env: &FeedEnvelope, format: ResolvedOutputFormat) -> String {
         ResolvedOutputFormat::Yaml => serde_yaml::to_string(env).unwrap_or_default(),
         ResolvedOutputFormat::Md => {
             let mut out = String::new();
+            out.push_str(&crate::resolve_value::unverified_filter_notes(
+                &env.table,
+                &env.unverified_filters,
+                false,
+            ));
             out.push_str(&format!(
                 "# Activity Feed — `{}` (since `{}`, {} tickets)\n\n",
                 env.table, env.since, env.count
