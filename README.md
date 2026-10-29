@@ -166,6 +166,9 @@ sncfr doctor
 
 # Locked-down or customized instance? Write a draft Instance Pack from what you can read
 sncfr discover            # then follow the printed next steps; add --no-samples to read no record rows
+
+# Start a shift: everything that needs you, by reason, with what could not be checked
+sncfr triage
 ```
 
 ### 2. Explore Queues, Stats, & Activity Feeds (Read-Only)

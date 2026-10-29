@@ -44,6 +44,10 @@ pub struct ApprovalItem {
     /// How `approvals list` found this row (APR-1): `user`, `group`, or `both`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_by: Option<String>,
+    /// The approved document's dot-walked `sysapproval.*` fields as `(display, value)`, for
+    /// `triage` (TRI-4).
+    #[serde(skip)]
+    pub document: std::collections::BTreeMap<String, (String, String)>,
 }
 
 impl ApprovalItem {
@@ -137,10 +141,7 @@ pub async fn execute_approvals_list(
                 &[
                     ("sysparm_query", q.as_str()),
                     ("sysparm_display_value", "all"),
-                    (
-                        "sysparm_fields",
-                        "sys_id,state,approver,group,group.assignment_group,sysapproval,document_id,source_table,comments,sys_created_on,sys_updated_on",
-                    ),
+                    ("sysparm_fields", APPROVAL_LIST_FIELDS),
                     ("sysparm_limit", "50"),
                 ],
             )
@@ -175,6 +176,9 @@ pub async fn execute_approvals_list(
         items,
     })
 }
+
+/// `approvals list` fields: the approval, its group linkage, and the document's triage fields.
+const APPROVAL_LIST_FIELDS: &str = "sys_id,state,approver,group,group.assignment_group,sysapproval,document_id,source_table,comments,sys_created_on,sys_updated_on,sysapproval.sys_id,sysapproval.number,sysapproval.sys_class_name,sysapproval.short_description,sysapproval.priority,sysapproval.sys_created_on,sysapproval.sys_updated_on,sysapproval.assigned_to,sysapproval.assignment_group";
 
 /// Deduplicates by `sys_id`, newest first, recording `linked_by` (APR-1).
 fn merge_linked_approvals(
@@ -374,6 +378,21 @@ fn parse_approval_rows(resp: &Value) -> Vec<ApprovalItem> {
                 group: extract_field_display(row, "group"),
                 group_assignment_group: extract_field_value(row, "group.assignment_group"),
                 linked_by: None,
+                document: row
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|o| o.keys())
+                    .filter_map(|k| {
+                        let field = k.strip_prefix("sysapproval.")?;
+                        Some((
+                            field.to_string(),
+                            (
+                                extract_field_display(row, k).unwrap_or_default(),
+                                extract_field_value(row, k).unwrap_or_default(),
+                            ),
+                        ))
+                    })
+                    .collect(),
             });
         }
     }

@@ -1270,3 +1270,90 @@ async fn recipes_list_and_run_read_only_steps() {
         "read-only (NA-1)"
     );
 }
+
+#[tokio::test]
+async fn triage_renders_every_bucket_in_pack_order_with_coverage() {
+    // CT-44, CT-30d (TRI-1, TRI-3, TRI-6; NA-1)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::TriageTables).await;
+    corp.mount(support::Scenario::LinkedApprovals).await;
+    let out = corp.run(&["--json", "triage"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let env = out.json();
+    let names: Vec<&str> = env["buckets"]
+        .as_array()
+        .expect("buckets")
+        .iter()
+        .map(|b| b["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "sla_at_risk",
+            "customer_replied",
+            "unassigned",
+            "stale",
+            "approvals",
+            "vip"
+        ]
+    );
+    let bucket = |n: &str| {
+        env["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(bucket("sla_at_risk")["status"], "restricted");
+    let replied = bucket("customer_replied");
+    assert_eq!(replied["items"][0]["reason_code"], "CUSTOMER_REPLIED");
+    assert!(
+        replied["items"][0]["also_in"].to_string().contains("stale"),
+        "{replied}"
+    );
+    assert_eq!(bucket("approvals")["count"], 3);
+    let summary = env["summary"].as_str().unwrap_or_default();
+    assert!(
+        summary.starts_with("triage: 5 of 6 buckets checked"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("not checked: sla_at_risk (403)"),
+        "{summary}"
+    );
+
+    let md = corp.run(&["-o", "md", "triage"]);
+    assert!(md.stdout.starts_with("triage: 5 of 6"), "{}", md.stdout);
+    assert!(
+        md.stdout.contains("## sla_at_risk: not checked"),
+        "{}",
+        md.stdout
+    );
+    let journal = corp.queries_to("/api/now/table/sys_journal_field").await;
+    assert!(
+        journal
+            .iter()
+            .all(|q| !q.contains("value%2C") && !q.ends_with("value")),
+        "never reads journal text: {journal:?}"
+    );
+    assert!(
+        corp.mutating_requests().await.is_empty(),
+        "read-only (NA-1)"
+    );
+}
+
+#[tokio::test]
+async fn triage_with_every_bucket_forbidden_exits_4() {
+    // CT-44b (TRI-6)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::TriageForbidden).await;
+    let out = corp.run(&["-o", "md", "triage"]);
+    assert_eq!(out.code, 4, "{}\n{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.starts_with("triage: 0 of 6 buckets checked"),
+        "{}",
+        out.stdout
+    );
+}

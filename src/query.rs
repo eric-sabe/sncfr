@@ -19,6 +19,21 @@ pub fn expand_group_names(pack: &crate::pack::MergedPack, name: &str) -> Vec<Str
         .collect()
 }
 
+/// `active=true^stateNOT IN6,7` → `task.active=true^task.stateNOT IN6,7` (each term, `^OR`
+/// included). Clauses like `^NQ` are rejected by `pack validate`, so none reach here.
+pub fn prefix_terms(query: &str, prefix: &str) -> String {
+    query
+        .split('^')
+        .filter(|t| !t.is_empty())
+        .map(|t| match t.strip_prefix("OR") {
+            Some(rest) => format!("OR{prefix}{rest}"),
+            None if t.starts_with("ORDERBY") => t.to_string(),
+            None => format!("{prefix}{t}"),
+        })
+        .collect::<Vec<_>>()
+        .join("^")
+}
+
 /// The footer note for a suffix-expanded `--group` filter, if any.
 pub fn group_expansion_note(
     pack: &crate::pack::MergedPack,

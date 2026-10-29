@@ -24,6 +24,7 @@ pub mod resolve;
 pub mod resolve_value;
 pub mod schema;
 pub mod skill;
+pub mod triage;
 pub mod untrusted;
 pub mod workflows;
 pub use client::write_gate;

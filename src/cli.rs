@@ -145,6 +145,9 @@ pub enum Commands {
     #[command(subcommand)]
     Cmdb(CmdbCommands),
 
+    /// What needs my attention now: reason-coded, read-only buckets with coverage (TRI)
+    Triage(TriageArgs),
+
     /// List or run the active pack's read-only recipes (WF-2, WF-3)
     #[command(subcommand)]
     Recipe(RecipeCommands),
@@ -227,6 +230,7 @@ impl Commands {
             | Self::Catalog(_)
             | Self::Cmdb(_)
             | Self::Recipe(_)
+            | Self::Triage(_)
             | Self::Schema(_)
             | Self::Table(_) => CommandOutputShape::Tabular,
         }
@@ -687,6 +691,30 @@ pub struct ApprovalActionArgs {
     /// Execute the approval/rejection in ServiceNow (without this flag, runs a Validated Dry-Run Preview)
     #[arg(short, long)]
     pub write: bool,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct TriageArgs {
+    /// Saved view (`@name`) that narrows the scope
+    pub view: Option<String>,
+    /// Table or ticket prefix (default: `task`)
+    #[arg(short, long)]
+    pub table: Option<String>,
+    /// Assignment group (pack suffixes apply), or `@my-groups`
+    #[arg(long, visible_alias = "assignment-group")]
+    pub group: Option<String>,
+    /// Only tickets assigned to `@me`
+    #[arg(long)]
+    pub mine: bool,
+    /// Buckets to run, in order (default: the pack's `triage.buckets`, else the built-ins)
+    #[arg(long, value_delimiter = ',')]
+    pub bucket: Vec<String>,
+    /// Stale cutoff (e.g. `3d`; default: pack `triage.stale_after`, else 3d)
+    #[arg(long)]
+    pub stale: Option<String>,
+    /// Items per bucket (default 10, at most 50)
+    #[arg(long)]
+    pub per_bucket: Option<u32>,
 }
 
 #[derive(Debug, Clone, Subcommand)]

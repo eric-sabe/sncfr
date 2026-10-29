@@ -544,6 +544,17 @@ async fn execute_authenticated_command(
             let out = sncfr::recipe::run(name, &recipe, &params, &client, &cache).await?;
             Ok(sncfr::recipe::format_recipe_output(&out, resolved_output))
         }
+        Commands::Triage(args) => {
+            let env = sncfr::triage::execute_triage(&profile, &client, &cache, args).await?;
+            let rendered = sncfr::triage::format_triage(&env, resolved_output);
+            match sncfr::triage::exit_error(&env) {
+                Some(err) => {
+                    println!("{rendered}");
+                    Err(err)
+                }
+                None => Ok(rendered),
+            }
+        }
         Commands::Cmdb(sncfr::cli::CmdbCommands::Lookup { input }) => {
             let lookup = sncfr::cmdb::execute_cmdb_lookup(&client, input).await?;
             Ok(sncfr::cmdb::format_cmdb_lookup(&lookup, resolved_output))
