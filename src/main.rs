@@ -524,11 +524,11 @@ async fn execute_authenticated_command(
         },
         Commands::Catalog(subcmd) => match subcmd {
             CatalogCommands::Search { query, limit } => {
-                let items = execute_catalog_search(&client, query, *limit).await?;
+                let items = execute_catalog_search(&client, &cache, query, *limit).await?;
                 Ok(format_catalog_search(&items, resolved_output))
             }
             CatalogCommands::Show { item } => {
-                let detail = execute_catalog_show(&client, item).await?;
+                let detail = execute_catalog_show(&client, &cache, item).await?;
                 Ok(format_catalog_detail(&detail, resolved_output))
             }
             CatalogCommands::Order(args) => {
