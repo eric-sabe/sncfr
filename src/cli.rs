@@ -141,6 +141,10 @@ pub enum Commands {
     /// Inspect table schema, custom fields (`u_*`/`x_*`), and valid `sys_choice` options
     Schema(SchemaArgs),
 
+    /// Look up configuration items (read-only, WF-1)
+    #[command(subcommand)]
+    Cmdb(CmdbCommands),
+
     /// Read-only query escape hatch for arbitrary ServiceNow tables (`sys_user`, `cmdb_ci`, `kb_knowledge`, etc.)
     Table(TableArgs),
 
@@ -217,6 +221,7 @@ impl Commands {
             | Self::Auth(_)
             | Self::Approvals(_)
             | Self::Catalog(_)
+            | Self::Cmdb(_)
             | Self::Schema(_)
             | Self::Table(_) => CommandOutputShape::Tabular,
         }
@@ -677,6 +682,16 @@ pub struct ApprovalActionArgs {
     /// Execute the approval/rejection in ServiceNow (without this flag, runs a Validated Dry-Run Preview)
     #[arg(short, long)]
     pub write: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CmdbCommands {
+    /// Find a CI by hostname, IP, FQDN, serial number, or sys_id, with its support group,
+    /// relationships, and open tasks
+    Lookup {
+        /// Hostname, IPv4/IPv6 address, FQDN, serial number, or 32-hex sys_id
+        input: String,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]

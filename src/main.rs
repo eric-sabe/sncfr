@@ -522,6 +522,10 @@ async fn execute_authenticated_command(
                 emit_mutation(&report, resolved_output)
             }
         },
+        Commands::Cmdb(sncfr::cli::CmdbCommands::Lookup { input }) => {
+            let lookup = sncfr::cmdb::execute_cmdb_lookup(&client, input).await?;
+            Ok(sncfr::cmdb::format_cmdb_lookup(&lookup, resolved_output))
+        }
         Commands::Catalog(subcmd) => match subcmd {
             CatalogCommands::Search { query, limit } => {
                 let items = execute_catalog_search(&client, &cache, query, *limit).await?;
