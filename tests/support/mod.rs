@@ -114,9 +114,47 @@ pub enum Scenario {
     /// `order_now` (REQ0000001); `sc_req_item?request=…` lists one RITM for the item and one for
     /// another item; `PATCH sc_req_item/<the item's RITM>` succeeds.
     CatalogOrderable,
+    /// A small CMDB: `cmdb_ci_server` answers `ip_address=10.0.0.5` with web-01 and the hostname
+    /// query for `web` with two servers; web-01 has one parent relationship and one open task.
+    Cmdb,
     /// `task` answers with recent rows (`number`, `sys_class_name`): three `ABC-` rows on
     /// `u_abc_request`, two `INC` rows (`task_sample.json`).
     TaskSample,
+}
+
+/// `cmdb_ci_server` rows keyed by the lookup query.
+struct CmdbServers;
+
+impl Respond for CmdbServers {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let q = req
+            .url
+            .query_pairs()
+            .find(|(k, _)| k == "sysparm_query")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        let server = |id: &str, name: &str| {
+            json!({
+                "sys_id": { "value": id, "display_value": id },
+                "name": { "value": name, "display_value": name },
+                "sys_class_name": { "value": "cmdb_ci_server", "display_value": "Server" },
+                "ip_address": { "value": "10.0.0.5", "display_value": "10.0.0.5" },
+                "support_group": { "value": "33333333333333333333333333333333", "display_value": "Network - L2" },
+                "install_status": { "value": "1", "display_value": "Installed" }
+            })
+        };
+        let rows = if q == "ip_address=10.0.0.5" {
+            json!([server("f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", "web-01")])
+        } else if q == "name=web^ORnameSTARTSWITHweb." {
+            json!([
+                server("f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", "web.example.com"),
+                server("f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2", "web.example.org")
+            ])
+        } else {
+            json!([])
+        };
+        ResponseTemplate::new(200).set_body_json(json!({ "result": rows }))
+    }
 }
 
 /// `sysapproval_approver` rows keyed by which linkage predicate the query carries.
@@ -421,6 +459,34 @@ impl ExampleCorp {
                     }})))
                     .mount(&self.server)
                     .await;
+            }
+            Scenario::Cmdb => {
+                Mock::given(method("GET"))
+                    .and(path("/api/now/table/cmdb_ci_server"))
+                    .respond_with(CmdbServers)
+                    .mount(&self.server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/api/now/table/cmdb_ci_server/f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {
+                        "name": { "value": "web-01", "display_value": "web-01" },
+                        "fqdn": { "value": "web-01.example.com", "display_value": "web-01.example.com" },
+                        "ip_address": { "value": "10.0.0.5", "display_value": "10.0.0.5" },
+                        "support_group": { "value": "33333333333333333333333333333333", "display_value": "Network - L2" },
+                        "install_status": { "value": "1", "display_value": "Installed" }
+                    }})))
+                    .mount(&self.server)
+                    .await;
+                self.get("cmdb_rel_ci", json!({ "result": [{
+                    "parent": { "value": "f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9", "display_value": "Example Web Service" },
+                    "type": { "value": "t", "display_value": "Runs on::Runs" }
+                }]})).await;
+                self.get("task_ci", json!({ "result": [{
+                    "task.number": { "value": "INC0012345", "display_value": "INC0012345" },
+                    "task.short_description": { "value": "VPN drops for the Example Corp branch", "display_value": "VPN drops for the Example Corp branch" },
+                    "task.state": { "value": "2", "display_value": "In Progress" },
+                    "task.sys_updated_on": { "value": "2026-10-22 10:00:00", "display_value": "2026-10-22 10:00:00" }
+                }]})).await;
             }
             Scenario::TaskSample => {
                 self.get("task", fixture("task_sample.json")).await;

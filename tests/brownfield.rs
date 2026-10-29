@@ -1183,3 +1183,44 @@ async fn fill_ritm_is_checked_with_the_order_and_bound_to_its_own_ritm() {
         vec!["/api/now/table/sc_req_item/e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"]
     );
 }
+
+#[tokio::test]
+async fn cmdb_lookup_answers_an_ip_and_flags_an_ambiguous_hostname() {
+    // CT-47, CT-30b (WF-1; NA-1)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::Cmdb).await;
+    let ip = corp.run(&["--json", "cmdb", "lookup", "10.0.0.5"]);
+    assert_eq!(ip.code, 0, "{}", ip.stderr);
+    let l = ip.json();
+    assert_eq!(l["matched_by"], "ip");
+    assert_eq!(l["ambiguous"], false);
+    assert_eq!(l["ci"]["support_group"], "Network - L2");
+    assert_eq!(
+        l["ci"]["fqdn"], "web-01.example.com",
+        "pack fields.default.cmdb_ci_server"
+    );
+    assert_eq!(l["open_tasks"][0]["number"], "INC0012345");
+    assert_eq!(l["parents"][0]["name"], "Example Web Service");
+    let task_queries = corp.queries_to("/api/now/table/task_ci").await;
+    assert!(
+        task_queries[0].contains("task.active%3Dtrue"),
+        "{task_queries:?}"
+    );
+
+    let dup = corp.run(&["--json", "cmdb", "lookup", "web"]);
+    assert_eq!(dup.code, 0, "{}", dup.stderr);
+    let d = dup.json();
+    assert_eq!(d["ambiguous"], true);
+    assert_eq!(d["matches"].as_array().map(Vec::len), Some(2));
+    assert!(
+        d["open_tasks"].is_null(),
+        "no follow-up reads for an ambiguous match"
+    );
+
+    let smuggled = corp.run(&["cmdb", "lookup", "web^ORname=db"]);
+    assert_eq!(smuggled.code, 2, "{}", smuggled.stderr);
+    assert!(
+        corp.mutating_requests().await.is_empty(),
+        "read-only (NA-1)"
+    );
+}
