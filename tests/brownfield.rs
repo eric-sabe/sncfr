@@ -484,3 +484,109 @@ async fn doctor_reports_absent_tables_drift_binding_and_the_capability_record() 
     );
     assert!(corp.mutating_requests().await.is_empty());
 }
+
+#[tokio::test]
+async fn table_reads_never_ask_for_counts_and_list_reads_skip_reference_links() {
+    // CT-28 (PERF-1, PERF-4)
+    let corp = ExampleCorp::start().await;
+    assert_eq!(corp.run(&["--json", "show", "INC0012345"]).code, 0);
+    assert_eq!(corp.run(&["--json", "list", "--table", "incident"]).code, 0);
+    let mut table_gets = 0;
+    for r in corp.requests().await {
+        if r.method.as_str() != "GET" || !r.url.path().starts_with("/api/now/table/") {
+            continue;
+        }
+        table_gets += 1;
+        let q: Vec<(String, String)> = r
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert!(
+            q.iter()
+                .any(|(k, v)| k == "sysparm_no_count" && v == "true"),
+            "missing sysparm_no_count on {}",
+            r.url
+        );
+    }
+    assert!(table_gets > 3, "{table_gets}");
+    let list_reads: Vec<_> = corp
+        .requests()
+        .await
+        .into_iter()
+        .filter(|r| {
+            r.url.path() == "/api/now/table/incident"
+                && r.url.query().unwrap_or_default().contains("ORDERBYDESC")
+        })
+        .collect();
+    assert!(!list_reads.is_empty());
+    for r in list_reads {
+        assert!(
+            r.url
+                .query()
+                .unwrap_or_default()
+                .contains("sysparm_exclude_reference_link=true"),
+            "{}",
+            r.url
+        );
+    }
+}
+
+#[tokio::test]
+async fn list_reports_has_more_without_counting_and_a_total_only_on_request() {
+    // PERF-2
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&["--json", "list", "--table", "incident", "--limit", "1"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["has_more"], true);
+    assert!(out.json().get("total").is_none());
+
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/now/table/incident"))
+        .and(wiremock::matchers::query_param("sysparm_no_count", "false"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("X-Total-Count", "42")
+                .set_body_string(
+                    std::fs::read_to_string(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/fixtures/example-corp/incident.json"),
+                    )
+                    .expect("fixture"),
+                ),
+        )
+        .with_priority(1)
+        .mount(&corp.server)
+        .await;
+    let counted = corp.run(&[
+        "--json",
+        "list",
+        "--table",
+        "incident",
+        "--limit",
+        "1",
+        "--with-count",
+    ]);
+    assert_eq!(counted.code, 0, "{}", counted.stderr);
+    assert_eq!(counted.json()["total"], 42);
+    assert_eq!(counted.json()["has_more"], true);
+}
+
+#[tokio::test]
+async fn journal_queries_carry_the_table_name_for_the_index() {
+    // CT-29 (PERF-3)
+    let corp = ExampleCorp::start().await;
+    assert_eq!(corp.run(&["--json", "show", "INC0012345"]).code, 0);
+    let queries = corp.queries_to("/api/now/table/sys_journal_field").await;
+    assert!(!queries.is_empty());
+    for q in queries {
+        let decoded: String = url::form_urlencoded::parse(q.as_bytes())
+            .find(|(k, _)| k == "sysparm_query")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        assert!(
+            decoded.starts_with("nameINincident,task^element_id="),
+            "{decoded}"
+        );
+    }
+}

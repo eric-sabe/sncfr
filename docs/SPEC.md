@@ -126,7 +126,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
   - Assembles a complete **Ticket Dossier** from concurrent Table API `GET`s, using a single `/api/now/batch` request as an optimization when the capability record (§7.2) says batch works on this instance. A batch 400 "URI does not represent any resource" or 404 is remembered as `unavailable`, a 403 as `unauthorized`, and later runs skip it. Each section below degrades on its own (`restricted` 403, `unavailable` 404/invalid table, `timed_out`, or `error`): JSON carries `sections.<name>.status` and `degraded[]`, Markdown shows a `⚠ Partial dossier: …` line, and the command still exits 0. Only failing to fetch the ticket itself fails the command:
     1. **Core & Custom Fields**: Curated core fields (`number`, `state`, `priority`, `urgency`, `impact`, `short_description`, `description`, `opened_by`, `caller_id`/`requested_for`, `assignment_group`, `assigned_to`, `sys_created_on`, `sys_updated_on`, `close_code`, `close_notes`, etc.) **plus all non-empty custom fields (`u_*`, `x_*`)** with `sysparm_display_value=all`.
     2. **Catalog Variables (for `sc_req_item` / `sc_task`)**: Queries `sc_item_option_mtom` $\to$ `sc_item_option` to render the question/answer pairs submitted on the Service Catalog form.
-    3. **Chronological Activity Stream (`comments` & `work_notes`)**: Queries `sys_journal_field` (`element_id=<sys_id>^ORDERBYsys_created_on`) to render customer-visible comments and internal work notes in chronological order. If `sys_journal_field` returns `403 Forbidden`, gracefully falls back to parsing inline `comments_and_work_notes` / `comments` display values.
+    3. **Chronological Activity Stream (`comments` & `work_notes`)**: Queries `sys_journal_field` (`nameIN<table>,task^element_id=<sys_id>^ORDERBYsys_created_on`; the `name` term keeps the query on its index, PERF-3) to render customer-visible comments and internal work notes in chronological order. If `sys_journal_field` returns `403 Forbidden`, gracefully falls back to parsing inline `comments_and_work_notes` / `comments` display values.
     4. **Related Hierarchy & Approvals**: Parent ticket (`parent`, `request`), child tasks (`task.parent=<sys_id>`), approvals (`sysapproval_approver.sysapproval=<sys_id>`), and impacted CIs (`task_ci`).
     5. **Attachments**: Lists attachment metadata (`sys_attachment.table_sys_id=<sys_id>`: file name, size, content type, uploader, timestamp, and `sys_id`).
 - **`sncfr list [@<saved-view>] [flags]`** (alias: `ls`)
@@ -145,6 +145,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
     - `--from-url <servicenow-ui-url>` (parses `sysparm_query` and table name directly from a pasted ServiceNow browser URL, including `/now/nav/ui/classic/params/target/...` URLs)
     - `--query <encoded_query>` (raw ServiceNow encoded query escape hatch)
     - `--limit <n>`, `--offset <n>`, `--sort <field>` / `--asc` / `--desc`
+    - `--with-count`: also return `total` (asks the instance to count, which can be slow on huge tables; `stats` is the cheaper count path). Without it, the envelope's `has_more` is inferred from `count == limit` (PERF-2).
 - **`sncfr search <TEXT> [flags]`**
   - Searches across tickets using ServiceNow full-text index (`123TEXTQUERY321=<TEXT>`) and/or `short_descriptionLIKE<TEXT>^ORdescriptionLIKE<TEXT>`, combinable with all `list` filter flags.
 - **`sncfr feed [@<saved-view>] [flags]`**
@@ -191,6 +192,10 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 ---
 
 ## 6. Output Contracts & Error Handling
+
+### 6.0 Table API Read Defaults (PERF-1, PERF-4)
+
+Every Table API read (direct and inside batch sub-requests) sends `sysparm_no_count=true` (counting very large tables times out) and `sysparm_exclude_reference_link=true`, unless the caller sets them explicitly. `list --with-count` asks for a total, and field-type inference keeps reference links.
 
 ### 6.1 Output Modes (`--output` / `-o`)
 
