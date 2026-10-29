@@ -143,7 +143,7 @@ impl Respond for CmdbServers {
                 "install_status": { "value": "1", "display_value": "Installed" }
             })
         };
-        let rows = if q == "ip_address=10.0.0.5" {
+        let rows = if q == "ip_address=10.0.0.5" || q == "name=web-01" {
             json!([server("f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", "web-01")])
         } else if q == "name=web^ORnameSTARTSWITHweb." {
             json!([
