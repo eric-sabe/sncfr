@@ -1049,3 +1049,57 @@ async fn agent_comments_and_notes_carry_the_pack_marker() {
     );
     assert!(corp.mutating_requests().await.is_empty());
 }
+
+const CATALOG_ITEM: &str = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+
+#[tokio::test]
+async fn catalog_reads_fall_back_to_the_table_api_without_reauth() {
+    // CT-22 (CAT-1 + CAP-4)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::CatalogUnauthorized).await;
+    let shown = corp.run(&["--json", "catalog", "show", CATALOG_ITEM]);
+    assert_eq!(shown.code, 0, "{}", shown.stderr);
+    let d = shown.json();
+    assert_eq!(d["source"], "table_api_fallback");
+    assert_eq!(d["name"], "Example Laptop");
+    let vars = d["variables"].as_array().expect("variables");
+    assert_eq!(
+        vars[0]["name"], "cost_center",
+        "ordered client-side by `order`"
+    );
+    assert_eq!(vars[1]["choices"][0], "Standard (standard)");
+
+    let found = corp.run(&["--json", "catalog", "search", "Laptop"]);
+    assert_eq!(found.code, 0, "{}", found.stderr);
+    assert_eq!(found.json()[0]["source"], "table_api_fallback");
+    let caps = std::fs::read_to_string(corp.cache_file("capabilities.json")).expect("caps");
+    assert!(caps.contains("\"catalog_api\""), "{caps}");
+}
+
+#[tokio::test]
+async fn catalog_order_has_no_fallback_and_sends_nothing() {
+    // CT-62 (CAT-1, NA-16)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::CatalogUnauthorized).await;
+    for _ in 0..2 {
+        // First run learns catalog_api=unauthorized mid-call; the second refuses up front.
+        let out = corp.run(&[
+            "catalog",
+            "order",
+            CATALOG_ITEM,
+            "--var",
+            "model=standard",
+            "--write",
+        ]);
+        assert_eq!(out.code, 4, "{}", out.stderr);
+        assert!(out.stderr.contains("Order in the portal"), "{}", out.stderr);
+        assert!(out.stderr.contains("sp?id=sc_cat_item"), "{}", out.stderr);
+    }
+    let posts: Vec<_> = corp
+        .requests()
+        .await
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .collect();
+    assert!(posts.is_empty(), "zero POST of any kind");
+}
