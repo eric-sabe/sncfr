@@ -535,6 +535,7 @@ mod tests {
             quantity: 1,
             requested_for: None,
             write: false,
+            poll_timeout: None,
         };
         let err = execute_catalog_order(client.clone(), &cache, &missing_var_order, None)
             .await
@@ -548,6 +549,7 @@ mod tests {
             quantity: 1,
             requested_for: None,
             write: false,
+            poll_timeout: None,
         };
         let dry_run = execute_catalog_order(client, &cache, &valid_order, None)
             .await
