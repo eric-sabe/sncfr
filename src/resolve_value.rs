@@ -1300,9 +1300,9 @@ values = [
         let s = schema(&[]);
         let record = json!({
             "u_service": { "value": "a".repeat(32), "display_value": "Mail",
-                "link": format!("https://x.service-now.com/api/now/table/cmdb_ci_service/{}", "a".repeat(32)) },
+                "link": format!("https://example.service-now.com/api/now/table/cmdb_ci_service/{}", "a".repeat(32)) },
             "u_odd": { "value": "1", "display_value": "One",
-                "link": "https://x.service-now.com/api/now/table/Bad-Table/1" },
+                "link": "https://example.service-now.com/api/now/table/Bad-Table/1" },
         });
         let ctx = ResolveCtx {
             pack: &p,
