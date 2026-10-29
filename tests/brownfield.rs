@@ -943,3 +943,72 @@ async fn discover_without_samples_reads_no_record_rows() {
     }
     assert!(corp.mutating_requests().await.is_empty());
 }
+
+#[tokio::test]
+async fn approvals_list_includes_group_linked_rows_once() {
+    // CT-37 (APR-1, APR-2, BF-TEST-2e)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::LinkedApprovals).await;
+    let out = corp.run(&["--json", "approvals", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let env = out.json();
+    let items = env["items"].as_array().expect("items");
+    let linked: Vec<(String, String)> = items
+        .iter()
+        .map(|i| {
+            (
+                i["sys_id"].as_str().unwrap_or_default().to_string(),
+                i["linked_by"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        linked,
+        vec![
+            (
+                "aa000000000000000000000000000003".to_string(),
+                "group".to_string()
+            ),
+            (
+                "aa000000000000000000000000000002".to_string(),
+                "both".to_string()
+            ),
+            (
+                "aa000000000000000000000000000001".to_string(),
+                "user".to_string()
+            ),
+        ],
+        "newest first, each row once"
+    );
+    assert_eq!(items[0]["group"], "Network - L2 approvers");
+    let queries = corp.queries_to("/api/now/table/sysapproval_approver").await;
+    assert_eq!(queries.len(), 2, "{queries:?}");
+    assert!(
+        queries
+            .iter()
+            .all(|q| q.contains("ORDERBYDESCsys_created_on")),
+        "{queries:?}"
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|q| q.contains("group.assignment_groupIN33333333333333333333333333333333")),
+        "{queries:?}"
+    );
+
+    let all = corp.run(&[
+        "--json",
+        "approvals",
+        "list",
+        "--all-users",
+        "--state",
+        "approved",
+    ]);
+    assert_eq!(all.code, 0, "{}", all.stderr);
+    let q = all.json()["query"].as_str().unwrap_or_default().to_string();
+    assert!(
+        q.contains("state=approved") && !q.contains("approver="),
+        "{q}"
+    );
+    assert!(all.json()["group_query"].is_null());
+}
