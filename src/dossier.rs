@@ -452,7 +452,7 @@ pub async fn assemble_ticket_dossier(
         batch_reqs.push(BatchGetSubRequest::new("child_tasks", children_url));
 
         let approvals_url = format!(
-            "/api/now/table/sysapproval_approver?sysparm_query=sysapproval={sys_id}^ORdocument_id={sys_id}^ORDERBYsys_created_on&sysparm_display_value=all&sysparm_fields=sys_id,approver,state,comments,sys_updated_on&sysparm_limit=50"
+            "/api/now/table/sysapproval_approver?sysparm_query=sysapproval={sys_id}^ORdocument_id={sys_id}^ORDERBYsys_created_on&sysparm_display_value=all&sysparm_fields=sys_id,approver,state,comments,sys_updated_on,document_id,source_table&sysparm_limit=50"
         );
         batch_reqs.push(BatchGetSubRequest::new("approvals", approvals_url));
 
