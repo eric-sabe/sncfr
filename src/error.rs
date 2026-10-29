@@ -155,6 +155,11 @@ pub enum SncfrError {
     )]
     ApiFamilyUnauthorized { family: String, resource: String },
 
+    #[error(
+        "Catalog ordering API is not authorized for this account (catalog_api={state}). Order in the portal: {portal_url}"
+    )]
+    CatalogOrderUnauthorized { state: String, portal_url: String },
+
     #[error("Request to '{resource}' timed out after {timeout_secs}s")]
     TimedOut { resource: String, timeout_secs: u64 },
 
@@ -228,7 +233,9 @@ impl SncfrError {
             Self::PackNotForInstance { .. } => ErrorCode::PackNotForInstance,
             Self::AmbiguousReference { .. } => ErrorCode::AmbiguousReference,
             Self::RateLimited { .. } | Self::TimedOut { .. } => ErrorCode::NetworkOrInstanceError,
-            Self::ApiFamilyUnauthorized { .. } => ErrorCode::AclForbidden,
+            Self::ApiFamilyUnauthorized { .. } | Self::CatalogOrderUnauthorized { .. } => {
+                ErrorCode::AclForbidden
+            }
             Self::WriteOutcomeUnknown { .. } => ErrorCode::WriteOutcomeUnknown,
         }
     }
@@ -269,6 +276,9 @@ impl SncfrError {
             ),
             Self::ApiFamilyUnauthorized { family, .. } => Some(format!(
                 "Your role can read tables but not call /api/{family}/. Read-only commands fall back to the Table API where they can; ask your ServiceNow admin for the API role, or use the portal."
+            )),
+            Self::CatalogOrderUnauthorized { portal_url, .. } => Some(format!(
+                "Order in the portal ({portal_url}), or ask your ServiceNow admin for the catalog API role. Read-only `catalog search`/`show` still work."
             )),
             Self::TimedOut { timeout_secs, .. } => Some(format!(
                 "Re-run with a longer timeout, e.g. `--timeout {}`.",
