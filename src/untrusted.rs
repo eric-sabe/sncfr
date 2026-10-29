@@ -212,7 +212,7 @@ mod tests {
     fn link_tables_pass_the_table_name_rule() {
         // DISC-1
         let id = "0123456789abcdef0123456789abcdef";
-        let ok = format!("https://x.service-now.com/api/now/table/sys_user_group/{id}");
+        let ok = format!("https://example.service-now.com/api/now/table/sys_user_group/{id}");
         assert_eq!(link_table(&ok).as_deref(), Some("sys_user_group"));
         for bad in [
             format!("https://x/api/now/table/Sys-User/{id}"),
