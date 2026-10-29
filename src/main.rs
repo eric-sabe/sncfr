@@ -141,6 +141,21 @@ async fn main() -> ExitCode {
         }
     }
 
+    // SAFE-8: the pack's agent write marker, for non-interactive invocations.
+    let agent = sncfr::mutate::agent_invocation(
+        cli.no_interactive,
+        std::env::var("SNCFR_AGENT").ok().as_deref(),
+        is_stdin_tty,
+        resolved_profile
+            .as_ref()
+            .map_or_else(Default::default, |p| p.agent_marker),
+    );
+    sncfr::mutate::install_journal_marker(
+        agent
+            .then(|| sncfr::pack::active().safety.agent_write_marker.clone())
+            .flatten(),
+    );
+
     match sncfr::write_gate::AllowList::parse(&cli.allow_unverified) {
         Ok(list) => {
             sncfr::write_gate::install_allow_list(list);
