@@ -526,6 +526,30 @@ impl MergedPack {
         }
     }
 
+    /// `table`, then its ancestors from `[hierarchy]` (cycles stop the walk).
+    pub fn lineage(&self, table: &str) -> Vec<String> {
+        let mut chain = vec![table.to_string()];
+        let mut cur = table.to_string();
+        while let Some(parent) = self.hierarchy.get(&cur).map(|p| p.value.clone()) {
+            if chain.contains(&parent) {
+                break;
+            }
+            chain.push(parent.clone());
+            cur = parent;
+        }
+        chain
+    }
+
+    /// The nearest `fields.default.<t>` along the hierarchy with a non-empty `list` (or
+    /// `dossier`, with `dossier = true`) (DOS-2).
+    pub fn default_fields(&self, table: &str, dossier: bool) -> Option<Vec<String>> {
+        self.lineage(table).iter().find_map(|t| {
+            let d = &self.fields_default.get(t)?.value;
+            let fields = if dossier { &d.dossier } else { &d.list };
+            (!fields.is_empty()).then(|| fields.clone())
+        })
+    }
+
     /// Known ticket prefixes (upper-case) → table.
     pub fn prefix_map(&self) -> BTreeMap<String, String> {
         self.prefixes

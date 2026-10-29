@@ -164,6 +164,9 @@ async fn execute_filtered_query(
         && !view.fields.is_empty()
     {
         view.fields.clone()
+    } else if let Some(pack_list) = crate::pack::active().default_fields(&table, false) {
+        // DOS-2: `fields.default.<table>.list`, nearest along the hierarchy.
+        pack_list
     } else if is_ticket_default {
         crate::pack::active().core.list_columns.clone()
     } else {
