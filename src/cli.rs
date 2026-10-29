@@ -828,6 +828,12 @@ pub enum SkillCommands {
         /// Destination path for `SKILL.md`
         #[arg(long, default_value = ".agents/skills/sncfr/SKILL.md")]
         path: PathBuf,
+        /// Organization overlay appended after a marker (default: profile `skill_overlay`)
+        #[arg(long)]
+        overlay: Option<PathBuf>,
+        /// Write even when the target is inside a git worktree and not ignored
+        #[arg(long)]
+        force: bool,
     },
 }
 

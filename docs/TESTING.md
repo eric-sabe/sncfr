@@ -254,5 +254,62 @@ sncfr catalog order <ITEM_SYS_ID> --var requested_region=us-east-1
 sncfr skill print
 
 # Install SKILL.md into your workspace for coding agents (Claude Code, Antigravity, Cursor)
-sncfr skill install .agents/skills/sncfr/SKILL.md
+sncfr skill install --path .agents/skills/sncfr/SKILL.md
+
+# With an organization overlay (see docs/skills/overlay-template.md)
+sncfr skill install --path .agents/skills/sncfr/SKILL.md --overlay ./my-org.overlay.md
+```
+
+---
+
+## Phase 6: Brownfield Smoke Test (0.2.0)
+
+Run these against a real, customized instance (custom prefixes, renumbered choices, restrictive ACLs). Nothing in this phase writes to the instance, except the last step, which needs `--write` and a test ticket.
+
+### 6.1 Draft an Instance Pack (`sncfr discover`)
+```bash
+# Read-only probes; writes a 0600 draft with an "# observed" comment per entry
+sncfr discover --out ./mycompany.draft.pack.toml
+# Privacy-maximal variant: reads no record rows (prefixes from sys_number only)
+sncfr discover --no-samples --out ./mycompany.minimal.pack.toml --force
+
+sncfr pack validate ./mycompany.draft.pack.toml      # warnings only: draft status, complete-set notices
+sncfr --pack ./mycompany.draft.pack.toml pack show
+```
+Check that the draft holds no user names, emails, sys_ids, or full group names, only prefixes, field names, choice labels, capability states, and suffix strings. Review each choice set, add values never used, set `status = "active"`, and point a profile at it (`pack = "…"`).
+
+### 6.2 Capabilities & Fallbacks
+```bash
+sncfr doctor --refresh          # capability table, pack headline, binding, drift, "not installed" tables
+sncfr show <TICKET>             # degraded sections show as restricted / timed_out, never as an error
+sncfr catalog show <ITEM>       # without the catalog API role: source table_api_fallback
+```
+
+### 6.3 Identifiers, Open Rules, Groups
+```bash
+sncfr show ABC-1234567                          # hyphenated custom prefix
+sncfr list --table incident --open              # the pack's open_rule, reported in the footer
+sncfr list --table incident --group Network     # suffix expansion footer: Network → Network - L2, ...
+sncfr list --table incident --priority low      # resolved per table, or an in-band ⚠ when unverifiable
+```
+
+### 6.4 Fail-Closed Values (exit 8) & Post-Write Checks (exit 9)
+```bash
+sncfr update <TEST_TICKET> --priority low           # preview Source/Status columns
+sncfr update <TEST_TICKET> --set u_unknown=x        # exit 8: UNVERIFIABLE (unknown_field), nothing sent
+sncfr catalog order <ITEM> --var bogus=1            # exit 8: var:bogus
+```
+
+### 6.5 Read Workflows
+```bash
+sncfr triage                                        # coverage line first; every bucket rendered
+sncfr cmdb lookup <HOSTNAME_OR_IP>                  # support group, relationships, open tasks
+sncfr recipe list
+sncfr recipe run <NAME> --param key=value
+```
+
+### 6.6 Agent Marker (needs a pack with `audit.agent_write_marker`)
+```bash
+SNCFR_AGENT=1 sncfr note <TEST_TICKET> "smoke test"          # preview Source: input + marker
+SNCFR_AGENT=1 sncfr note <TEST_TICKET> "smoke test" --write  # the work note starts with the marker
 ```

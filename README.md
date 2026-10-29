@@ -48,10 +48,10 @@ cargo install --git https://github.com/eric-sabe/sncfr.git
 ```
 
 > [!IMPORTANT]
-> `main` is currently **0.2.0-dev** (brownfield instance support, in progress; see [`docs/specs/brownfield-instance-support.md`](docs/specs/brownfield-instance-support.md)). For the latest stable release, pin the tag:
+> **0.2.0** adds brownfield instance support: Instance Packs, fail-closed value checks (exit `8`), post-write checks (exit `9`), capability-aware fallbacks, `discover`, `triage`, `cmdb lookup`, and recipes. Read [Behavior changes from 0.1.x](#behavior-changes-from-01x) before upgrading. To pin a release:
 >
 > ```bash
-> cargo install --git https://github.com/eric-sabe/sncfr.git --tag v0.1.6
+> cargo install --git https://github.com/eric-sabe/sncfr.git --tag v0.2.0
 > ```
 
 Cargo will download the source, compile an optimized release binary, and install it to `~/.cargo/bin/sncfr`. Verify it works:
@@ -112,7 +112,7 @@ See [`docs/TESTING.md`](docs/TESTING.md) for a step-by-step functional test plan
 
 ## Behavior changes from 0.1.x
 
-Changes in 0.2.0 that existing users and agents will notice are listed here as they land on `main`.
+Changes in 0.2.0 that existing users and agents will notice. Design and rationale: [`docs/specs/brownfield-instance-support.md`](docs/specs/brownfield-instance-support.md).
 
 | Situation | 0.1.x | 0.2.0 |
 |---|---|---|
@@ -146,6 +146,7 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 | `catalog order --var` | sent as typed | choice values checked (non-match exit `2`), references resolved, unknown names `UNVERIFIABLE (unknown_field)` (exit `8`) |
 | `catalog order --write` result | the request only | the request plus its requested items (`items[]`), polled up to `--poll-timeout` (default 20 s); a timeout only warns |
 | `catalog order --fill-ritm` | n/a | also writes the pack's `post_order_fill` fields to the order's own RITM, checked before ordering |
+| `skill install` into an unignored git worktree | written | exit `2` unless `--force` (SKILL.md contains instance metadata) |
 | `--priority low` where `sys_choice` is unreadable but stats show the values in use | `UNVERIFIABLE (no_metadata)` | verified against the in-use set, or `UNVERIFIABLE (not_seen` / `ootb_unconfirmed)` with the in-use values listed |
 
 ---

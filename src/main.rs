@@ -312,8 +312,18 @@ async fn main() -> ExitCode {
                 );
                 return ExitCode::SUCCESS;
             }
-            SkillCommands::Install { path } => {
-                match install_skill_markdown(path, &config, resolved_profile.as_ref()) {
+            SkillCommands::Install {
+                path,
+                overlay,
+                force,
+            } => {
+                match install_skill_markdown(
+                    path,
+                    &config,
+                    resolved_profile.as_ref(),
+                    overlay.as_deref(),
+                    *force,
+                ) {
                     Ok(summary) => {
                         println!("{}", format_skill_install(&summary, resolved_output));
                         return ExitCode::SUCCESS;
