@@ -28,6 +28,8 @@ pub enum ErrorCode {
     InvalidQueryValue,
     /// Exit code 2: The merged Instance Pack does not list this instance (NA-14).
     PackNotForInstance,
+    /// Exit code 2: A user/group/approval reference matched more than one record (NA-3).
+    AmbiguousReference,
     /// Exit code 8: A value could not be confirmed against a pack or instance metadata; nothing
     /// was written (SAFE-3).
     Unverifiable,
@@ -43,7 +45,8 @@ impl ErrorCode {
             | Self::ValidationError
             | Self::PackInvalid
             | Self::InvalidQueryValue
-            | Self::PackNotForInstance => 2,
+            | Self::PackNotForInstance
+            | Self::AmbiguousReference => 2,
             Self::AuthExpired | Self::AuthRequired => 3,
             Self::AclForbidden => 4,
             Self::NotFound => 5,
@@ -68,6 +71,7 @@ impl ErrorCode {
             Self::PackInvalid => "PACK_INVALID",
             Self::InvalidQueryValue => "INVALID_QUERY_VALUE",
             Self::PackNotForInstance => "PACK_NOT_FOR_INSTANCE",
+            Self::AmbiguousReference => "AMBIGUOUS_REFERENCE",
             Self::Unverifiable => "UNVERIFIABLE",
             Self::WriteNotApplied => "WRITE_NOT_APPLIED",
         }
@@ -134,6 +138,15 @@ pub enum SncfrError {
         not_applied: Vec<crate::client::write_gate::NotApplied>,
     },
 
+    #[error("--{kind} \"{input}\" matches {} {kind}s ({detail}). Nothing was written.", .candidates.len())]
+    AmbiguousReference {
+        kind: String,
+        input: String,
+        detail: String,
+        candidates: Vec<String>,
+        suggestion: Option<String>,
+    },
+
     #[error("Instance Pack '{pack}' does not list instance '{instance}' (`instances = [...]`)")]
     PackNotForInstance { pack: String, instance: String },
 
@@ -189,6 +202,7 @@ impl SncfrError {
             Self::Unverifiable { .. } => ErrorCode::Unverifiable,
             Self::WriteNotApplied { .. } => ErrorCode::WriteNotApplied,
             Self::PackNotForInstance { .. } => ErrorCode::PackNotForInstance,
+            Self::AmbiguousReference { .. } => ErrorCode::AmbiguousReference,
         }
     }
 
@@ -226,6 +240,10 @@ impl SncfrError {
             Self::WriteNotApplied { .. } => Some(
                 "Do not retry. Report the not_applied fields to the user and check the record with `sncfr show`.".to_string(),
             ),
+            Self::AmbiguousReference { kind, suggestion, .. } => Some(match suggestion {
+                Some(s) => format!("Suggestion (not applied): {s}. Re-run with the exact {kind} name from the candidates, or its sys_id."),
+                None => format!("Re-run with the exact {kind} name from the candidates, or its sys_id."),
+            }),
             Self::PackNotForInstance { .. } => Some(
                 "Use the pack written for this instance, or add the host to the pack's `instances` after checking its facts apply.".to_string(),
             ),
@@ -243,6 +261,7 @@ impl SncfrError {
         let code = self.code();
         let valid_choices = match self {
             Self::Validation { valid_choices, .. } => valid_choices.clone(),
+            Self::AmbiguousReference { candidates, .. } => candidates.clone(),
             _ => Vec::new(),
         };
         ErrorEnvelope {

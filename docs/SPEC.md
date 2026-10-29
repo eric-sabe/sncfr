@@ -137,6 +137,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
     - `--watch-list <user|@me>`
     - `--active` / `--inactive` / `--state <state,...>`
     - `--priority <1..5,...>`
+    - `--state` / `--priority` values resolve per target table through the same chain as mutations (§4.2, Q-1). A `task`-level query with no `task`-level definition requires every child table with a known set (pack or schema cache) to agree, else exit `2` naming the tables. Values that can't be verified are sent as typed and reported in-band (a ⚠ line above the results; envelope `unverified_filters[]`); this never blocks a read.
     - `--updated-since <duration|timestamp>` (e.g., `4h`, `2d`, `2026-10-20`)
     - `--created-since <duration|timestamp>`
     - `--from-url <servicenow-ui-url>` (parses `sysparm_query` and table name directly from a pasted ServiceNow browser URL, including `/now/nav/ui/classic/params/target/...` URLs)
@@ -160,6 +161,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 - **`sncfr update <TICKET> [flags] [--write]`**
   - Ergonomic flags: `--state <val>`, `--priority <val>`, `--urgency <val>`, `--impact <val>`, `--assign-to <user|@me|none>`, `--group <group>`, `--short-description <text>`, `--close-code <val>`, `--close-notes <text>`, `--note <work_note>`, `--comment <comment>`, `--set <field=value>...`.
   - Validates choice values and user/group references before previewing or writing.
+  - **References never guess (SAFE-7)**: `--group` tries an exact match in `@my-groups`, then an exact `sys_user_group` name, then the pack's `groups.suffixes` (e.g. `Storage` → `Storage - L2`). Users match one `user_name`/`email`/`name`. More than one candidate at any step exits `2` `AMBIGUOUS_REFERENCE`, listing candidates (★ marks your own groups) and any pack `suggest_map` suggestion, which is never applied. The preview's Source shows how each reference resolved (`group:exact`, `group:suffix " - L2"`, `group:my_groups`, `user:@me`, ...).
 - **`sncfr create <table|prefix> [flags] [--write]`**
   - Creates a new ticket (e.g., `sncfr create inc --short-description "..." --description "..." --write`).
 - **`sncfr attach <TICKET> <FILE_PATH>... [--write]`**

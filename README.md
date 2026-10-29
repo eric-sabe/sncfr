@@ -121,6 +121,9 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 | `--priority low` on an OOTB, readable instance | exit `2` (no label "low") | exit `0`, value `4`, source `ootb` (alias confirmed by the instance) |
 | A choice value or `--set` field that can't be checked (no readable choices, unknown field, unknown type) | sent as typed | exit `8` `UNVERIFIABLE`, nothing written; `--allow-unverified <field>` sends it as typed |
 | Dry-run containing such a field | exit `0` | exit `8` (preview still printed) |
+| User or group input with 2+ matches | first row silently picked | exit `2` `AMBIGUOUS_REFERENCE` with candidates |
+| `list`/`stats`/`feed` `--state`/`--priority` | sent as typed | resolved per table (e.g. `--priority low` → `5` with a pack); unverifiable values sent as typed with an in-band ⚠ |
+| `--group Storage` where only `Storage - L2` exists (pack suffixes) | not found | resolves via suffix, shown as `group:suffix " - L2"` |
 | A field the instance silently ignored on write | reported as committed | exit `9` `WRITE_NOT_APPLIED` with `not_applied` |
 | `--write` with a pack whose `instances` excludes this instance | n/a | exit `2` `PACK_NOT_FOR_INSTANCE` |
 

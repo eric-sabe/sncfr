@@ -242,3 +242,118 @@ async fn draft_and_foreign_packs_cannot_authorize_writes() {
     assert_eq!(read.code, 0, "reads still work: {}", read.stderr);
     assert!(read.stderr.contains("warning"), "{}", read.stderr);
 }
+
+#[tokio::test]
+async fn group_references_follow_the_suffix_convention_but_never_guess() {
+    // CT-14 (ambiguous via suffix), CT-15 (unique via suffix) — NA-3, SAFE-7, Q-4
+    let corp = ExampleCorp::start().await;
+    corp.mount_incident_patch(serde_json::json!({})).await;
+
+    let storage = corp.run(&["--json", "update", "INC0012345", "--group", "Storage"]);
+    assert_eq!(storage.code, 0, "{}", storage.stderr);
+    let diff = &storage.json()["diffs"][0];
+    assert_eq!(diff["after_display"], "Storage - L2");
+    assert_eq!(diff["after_value"], "55555555555555555555555555555555");
+    assert_eq!(diff["source"], "group:suffix \" - L2\"");
+
+    let network = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--group",
+        "Network",
+        "--write",
+    ]);
+    assert_eq!(network.code, 2, "{}", network.stderr);
+    assert!(
+        network.stderr.contains("AMBIGUOUS_REFERENCE"),
+        "{}",
+        network.stderr
+    );
+    assert!(
+        network.stderr.contains("Network - L2"),
+        "{}",
+        network.stderr
+    );
+    assert!(
+        network.stderr.contains("Network - L3"),
+        "{}",
+        network.stderr
+    );
+    assert!(
+        network.stderr.contains("you are a member"),
+        "{}",
+        network.stderr
+    );
+    assert!(
+        network.stderr.contains("Network Operations - L2"),
+        "suggestion shown: {}",
+        network.stderr
+    );
+    assert!(corp.mutating_requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_suggest_map_entry_is_never_applied() {
+    // CT-15c (SAFE-7)
+    let pack = support::EXAMPLE_PACK
+        .replace("suffixes = [\" - L2\", \" - L3\"]", "suffixes = []")
+        .replace(
+            "suggest_map = { \"Network\" = \"Network Operations - L2\" }",
+            "suggest_map = { \"Payroll\" = \"Storage - L2\" }",
+        );
+    let corp = ExampleCorp::start_with_pack(&pack).await;
+    corp.mount_incident_patch(serde_json::json!({})).await;
+    let out = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--group",
+        "Payroll",
+        "--write",
+    ]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("Suggestion (not applied): Storage - L2"),
+        "{}",
+        out.stderr
+    );
+    assert!(corp.patch_bodies().await.is_empty());
+}
+
+#[tokio::test]
+async fn read_filters_resolve_per_table_and_flag_what_they_cannot_verify() {
+    // CT-17b (Q-1): unverifiable filters never block a read but are reported in-band.
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&[
+        "--json",
+        "list",
+        "--table",
+        "incident",
+        "--state",
+        "Resolved",
+        "--priority",
+        "low",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let env = out.json();
+    let q = env["query"].as_str().unwrap_or_default();
+    assert!(
+        q.contains("state=Resolved"),
+        "unverified value sent as typed: {q}"
+    );
+    assert!(q.contains("priority=5"), "pack-resolved value sent: {q}");
+    assert_eq!(env["unverified_filters"][0]["field"], "state");
+    assert_eq!(env["unverified_filters"][0]["reason"], "no_metadata");
+
+    let md = corp.run(&[
+        "-o", "md", "list", "--table", "incident", "--state", "Resolved",
+    ]);
+    assert!(
+        md.stdout
+            .contains("⚠ state \"Resolved\" could not be verified for incident"),
+        "{}",
+        md.stdout
+    );
+}

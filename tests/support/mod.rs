@@ -12,8 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-use wiremock::matchers::{method, path, query_param};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 pub const ME_SYS_ID: &str = "11111111111111111111111111111111";
 pub const INCIDENT_SYS_ID: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
@@ -27,6 +27,61 @@ fn fixture(name: &str) -> Value {
     )
     .unwrap_or_else(|e| panic!("fixture {name}: {e}"));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
+/// `sys_user_group` lookups against the fixture directory.
+struct GroupDirectory(Vec<(String, String)>);
+
+impl GroupDirectory {
+    fn from_fixture() -> Self {
+        let mut groups = Vec::new();
+        for rows in fixture("groups.json")
+            .as_object()
+            .expect("groups object")
+            .values()
+        {
+            for r in rows.as_array().into_iter().flatten() {
+                groups.push((
+                    r["name"].as_str().unwrap_or_default().to_string(),
+                    r["sys_id"].as_str().unwrap_or_default().to_string(),
+                ));
+            }
+        }
+        Self(groups)
+    }
+}
+
+impl Respond for GroupDirectory {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let q = req
+            .url
+            .query_pairs()
+            .find(|(k, _)| k == "sysparm_query")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        let matches = |name: &str| -> bool {
+            if let Some(list) = q.strip_prefix("nameIN") {
+                return list.split(',').any(|n| n == name);
+            }
+            if let Some(prefix) = q.strip_prefix("nameSTARTSWITH") {
+                return name.starts_with(prefix);
+            }
+            q.split("^OR")
+                .any(|t| t.strip_prefix("name=") == Some(name))
+        };
+        let rows: Vec<Value> = self
+            .0
+            .iter()
+            .filter(|(name, _)| matches(name))
+            .map(|(name, sys_id)| {
+                json!({
+                    "sys_id": { "value": sys_id, "display_value": sys_id },
+                    "name": { "value": name, "display_value": name },
+                })
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "result": rows }))
+    }
 }
 
 /// Instance scenarios that can be layered onto the base mocks.
@@ -126,16 +181,13 @@ impl ExampleCorp {
             )
             .mount(&self.server)
             .await;
-        // Group lookups by exact name (suffix convention: " - L2", " - L3").
-        let groups = fixture("groups.json");
-        for (name, rows) in groups.as_object().expect("groups object") {
-            Mock::given(method("GET"))
-                .and(path("/api/now/table/sys_user_group"))
-                .and(query_param("sysparm_query", format!("name={name}")))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": rows })))
-                .mount(&self.server)
-                .await;
-        }
+        // Group directory (suffix convention: " - L2", " - L3"); answers name=, nameIN,
+        // ^OR chains of name=, and nameSTARTSWITH queries.
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_user_group"))
+            .respond_with(GroupDirectory::from_fixture())
+            .mount(&self.server)
+            .await;
     }
 
     pub async fn mount(&self, scenario: Scenario) {
