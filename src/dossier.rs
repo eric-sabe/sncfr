@@ -36,7 +36,15 @@ impl FieldValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogVariable {
     pub question: String,
+    /// The answer; for a resolved reference / list collector, the referenced record's display
+    /// value (DOS-1).
     pub value: String,
+    /// The stored sys_id(s) when `value` was resolved from a reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_value: Option<String>,
+    /// Set when a reference value could not be resolved: the table it points at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +174,137 @@ fn section_status(sub: &crate::client::ServicedSubResponse) -> SectionStatus {
     SectionStatus {
         status: status.to_string(),
         detail,
+    }
+}
+
+/// Catalog variable types whose value is a sys_id (8 = Reference) or a comma list of them
+/// (21 = List Collector).
+const REFERENCE_VARIABLE_TYPES: [&str; 2] = ["8", "21"];
+/// Ids per `sys_idIN` lookup.
+const REFERENCE_LOOKUP_CHUNK: usize = 100;
+/// Fallback display fields, in order, when the schema cache names none.
+const DISPLAY_FIELD_FALLBACK: [&str; 5] =
+    ["name", "number", "short_description", "user_name", "title"];
+
+/// The table a catalog variable row references (type 8 → `reference`, 21 → `list_table`).
+fn reference_table_of(row: &Value) -> Option<String> {
+    let ty = extract_field_value(row, "sc_item_option.item_option_new.type")?;
+    if !REFERENCE_VARIABLE_TYPES.contains(&ty.as_str()) {
+        return None;
+    }
+    let field = if ty == "21" {
+        "sc_item_option.item_option_new.list_table"
+    } else {
+        "sc_item_option.item_option_new.reference"
+    };
+    extract_field_value(row, field).filter(|t| !t.is_empty())
+}
+
+/// Display values already looked up in this invocation, keyed by `(table, sys_id)` (OQ-5).
+fn reference_memo() -> &'static std::sync::Mutex<BTreeMap<(String, String), String>> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<BTreeMap<(String, String), String>>> =
+        std::sync::OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+/// DOS-1: replaces reference / list-collector values with display values. Only 32-hex ids are
+/// looked up (NA-13), grouped per table into `sys_idIN` queries of at most 100 ids. Anything
+/// unresolved stays raw and is marked `unresolved_reference`.
+async fn resolve_catalog_references(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    vars: &mut [CatalogVariable],
+    tables: &[Option<String>],
+) {
+    let ids_of = |v: &str| -> Vec<String> { v.split(',').map(|i| i.trim().to_string()).collect() };
+    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (var, table) in vars.iter().zip(tables) {
+        let Some(table) = table
+            .as_ref()
+            .filter(|t| crate::untrusted::is_table_name(t))
+        else {
+            continue;
+        };
+        let ids = ids_of(&var.value);
+        if ids.iter().all(|i| crate::untrusted::is_sys_id(i)) {
+            let memo = reference_memo()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let list = wanted.entry(table.clone()).or_default();
+            for id in ids {
+                if !memo.contains_key(&(table.clone(), id.clone())) && !list.contains(&id) {
+                    list.push(id);
+                }
+            }
+        }
+    }
+    for (table, ids) in &wanted {
+        let display = cache.read_table_schema(table).ok().flatten().and_then(|s| {
+            s.fields
+                .iter()
+                .find(|(_, m)| m.display)
+                .map(|(k, _)| k.clone())
+        });
+        let mut fields: Vec<String> = vec!["sys_id".to_string()];
+        fields.extend(display.iter().cloned());
+        fields.extend(DISPLAY_FIELD_FALLBACK.iter().map(|f| (*f).to_string()));
+        fields.dedup();
+        let fields = fields.join(",");
+        for chunk in ids.chunks(REFERENCE_LOOKUP_CHUNK) {
+            let query = format!("sys_idIN{}", chunk.join(","));
+            let limit = chunk.len().to_string();
+            let Ok(resp) = client
+                .get_json::<Value>(
+                    &format!("/api/now/table/{table}"),
+                    &[
+                        ("sysparm_query", query.as_str()),
+                        ("sysparm_fields", fields.as_str()),
+                        ("sysparm_limit", limit.as_str()),
+                    ],
+                )
+                .await
+            else {
+                continue;
+            };
+            let mut memo = reference_memo()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for row in resp
+                .get("result")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(id) = extract_field_value(row, "sys_id") else {
+                    continue;
+                };
+                let label = display
+                    .iter()
+                    .map(String::as_str)
+                    .chain(DISPLAY_FIELD_FALLBACK)
+                    .find_map(|f| extract_field_display(row, f).filter(|v| !v.is_empty()));
+                if let Some(label) = label {
+                    memo.insert((table.clone(), id), label);
+                }
+            }
+        }
+    }
+    let memo = reference_memo()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (var, table) in vars.iter_mut().zip(tables) {
+        let Some(table) = table else { continue };
+        let ids = ids_of(&var.value);
+        let labels: Option<Vec<String>> = ids
+            .iter()
+            .map(|id| memo.get(&(table.clone(), id.clone())).cloned())
+            .collect();
+        match labels {
+            Some(labels) if crate::untrusted::is_table_name(table) => {
+                var.raw_value = Some(std::mem::replace(&mut var.value, labels.join(", ")));
+            }
+            _ => var.unresolved_reference = Some(table.clone()),
+        }
     }
 }
 
@@ -301,7 +440,7 @@ pub async fn assemble_ticket_dossier(
     if let Some(ritm_id) = &ritm_sys_id {
         let url = format!(
             // PERF-5: no ORDERBY on the dot-walked join; `order` is fetched and sorted here.
-            "/api/now/table/sc_item_option_mtom?sysparm_query=request_item={ritm_id}&sysparm_display_value=all&sysparm_fields=sc_item_option.item_option_new,sc_item_option.value,sc_item_option.order&sysparm_limit=100"
+            "/api/now/table/sc_item_option_mtom?sysparm_query=request_item={ritm_id}&sysparm_display_value=all&sysparm_fields=sc_item_option.item_option_new,sc_item_option.value,sc_item_option.order,sc_item_option.item_option_new.type,sc_item_option.item_option_new.reference,sc_item_option.item_option_new.list_table&sysparm_limit=100"
         );
         batch_reqs.push(BatchGetSubRequest::new("catalog_vars", url));
     }
@@ -425,6 +564,7 @@ pub async fn assemble_ticket_dossier(
                         .and_then(|o| o.parse::<i64>().ok())
                         .unwrap_or(i64::MAX)
                 });
+                let mut refs: Vec<Option<String>> = Vec::new();
                 for row in rows {
                     let question = extract_field_display(row, "sc_item_option.item_option_new");
                     let answer = extract_field_display(row, "sc_item_option.value");
@@ -432,12 +572,16 @@ pub async fn assemble_ticket_dossier(
                         && !q.is_empty()
                         && !a.is_empty()
                     {
+                        refs.push(reference_table_of(row));
                         catalog_variables.push(CatalogVariable {
                             question: q,
                             value: a,
+                            raw_value: None,
+                            unresolved_reference: None,
                         });
                     }
                 }
+                resolve_catalog_references(client, cache, &mut catalog_variables, &refs).await;
             }
         } else if sub.is_forbidden() {
             acl_warnings.push(
@@ -682,18 +826,86 @@ pub fn format_ticket_dossiers(dossiers: &[TicketDossier], format: ResolvedOutput
     }
 }
 
+/// A copy of `d` with every instance-sourced string made safe for display (NA-9): `single`
+/// for one-line values; multi-line bodies (description, close notes, journal) are cleaned here
+/// and fenced by the Markdown renderer.
+fn sanitized(d: &TicketDossier, single: fn(&str) -> String) -> TicketDossier {
+    let multi = |k: &str| k == "description" || k == "close_notes";
+    let field = |k: &str, v: &FieldValue| FieldValue {
+        display_value: if multi(k) {
+            crate::untrusted::clean(&v.display_value)
+        } else {
+            single(&v.display_value)
+        },
+        raw_value: v.raw_value.as_deref().map(single),
+    };
+    let mut out = d.clone();
+    out.core_fields = d
+        .core_fields
+        .iter()
+        .map(|(k, v)| (k.clone(), field(k, v)))
+        .collect();
+    out.custom_fields = d
+        .custom_fields
+        .iter()
+        .map(|(k, v)| (k.clone(), field(k, v)))
+        .collect();
+    for v in &mut out.catalog_variables {
+        v.question = single(&v.question);
+        v.value = single(&v.value);
+        v.unresolved_reference = v.unresolved_reference.as_deref().map(single);
+    }
+    for e in &mut out.activity_stream.entries {
+        e.author = single(&e.author);
+        e.element = single(&e.element);
+        e.timestamp = single(&e.timestamp);
+        e.body = crate::untrusted::clean(&e.body);
+    }
+    let r = &mut out.related;
+    for o in [&mut r.parent, &mut r.request, &mut r.request_item] {
+        *o = o.as_deref().map(single);
+    }
+    r.impacted_cis = r.impacted_cis.iter().map(|c| single(c)).collect();
+    for c in &mut r.child_tasks {
+        c.number = single(&c.number);
+        c.state = single(&c.state);
+        c.short_description = single(&c.short_description);
+    }
+    for a in &mut r.approvals {
+        a.approver = single(&a.approver);
+        a.state = single(&a.state);
+        a.updated_on = single(&a.updated_on);
+    }
+    for a in &mut out.attachments {
+        a.file_name = single(&a.file_name);
+        a.content_type = single(&a.content_type);
+    }
+    out
+}
+
+/// One-line terminal text: control and format characters removed, line breaks as `⏎`.
+fn terminal_line(s: &str) -> String {
+    crate::untrusted::clean(s)
+        .replace('\n', " ⏎ ")
+        .replace('\t', " ")
+}
+
+fn catalog_value_text(v: &CatalogVariable) -> String {
+    match &v.unresolved_reference {
+        Some(t) => format!("{} (unresolved reference to {t})", v.value),
+        None => v.value.clone(),
+    }
+}
+
 fn format_single_dossier_md(d: &TicketDossier) -> String {
+    let d = &sanitized(d, crate::untrusted::inline);
     let mut out = String::new();
     let short_desc = d
         .core_fields
         .get("short_description")
         .map(|f| f.display_value.as_str())
         .unwrap_or("(no short description)");
-    out.push_str(&format!(
-        "# {} — {}\n\n",
-        d.number,
-        crate::untrusted::inline(short_desc)
-    ));
+    out.push_str(&format!("# {} — {}\n\n", d.number, short_desc));
     if !d.degraded.is_empty() {
         let parts: Vec<String> = d
             .degraded
@@ -721,10 +933,16 @@ fn format_single_dossier_md(d: &TicketDossier) -> String {
     }
 
     if let Some(desc) = d.core_fields.get("description") {
-        out.push_str(&format!("\n### Description\n\n{}\n", desc.display_value));
+        out.push_str(&format!(
+            "\n### Description\n\n{}\n",
+            crate::untrusted::fenced_block(&desc.display_value)
+        ));
     }
     if let Some(notes) = d.core_fields.get("close_notes") {
-        out.push_str(&format!("\n### Close Notes\n\n{}\n", notes.display_value));
+        out.push_str(&format!(
+            "\n### Close Notes\n\n{}\n",
+            crate::untrusted::fenced_block(&notes.display_value)
+        ));
     }
 
     if !d.custom_fields.is_empty() {
@@ -741,7 +959,11 @@ fn format_single_dossier_md(d: &TicketDossier) -> String {
     if !d.catalog_variables.is_empty() {
         out.push_str("\n## Service Catalog Variables\n\n");
         for var in &d.catalog_variables {
-            out.push_str(&format!("- **{}**: {}\n", var.question, var.value));
+            out.push_str(&format!(
+                "- **{}**: {}\n",
+                var.question,
+                catalog_value_text(var)
+            ));
         }
     }
 
@@ -801,11 +1023,18 @@ fn format_single_dossier_md(d: &TicketDossier) -> String {
     } else {
         for entry in &d.activity_stream.entries {
             if entry.timestamp.is_empty() {
-                out.push_str(&format!("### [{}]\n{}\n\n", entry.element, entry.body));
+                out.push_str(&format!(
+                    "### [{}]\n{}\n\n",
+                    entry.element,
+                    crate::untrusted::fenced_block(&entry.body)
+                ));
             } else {
                 out.push_str(&format!(
                     "### {} — `{}` ({})\n{}\n\n",
-                    entry.timestamp, entry.author, entry.element, entry.body
+                    entry.timestamp,
+                    entry.author,
+                    entry.element,
+                    crate::untrusted::fenced_block(&entry.body)
                 ));
             }
         }
@@ -815,6 +1044,7 @@ fn format_single_dossier_md(d: &TicketDossier) -> String {
 }
 
 fn format_single_dossier_terminal(d: &TicketDossier) -> String {
+    let d = &sanitized(d, terminal_line);
     let mut out = String::new();
     let short_desc = d
         .core_fields
@@ -858,7 +1088,11 @@ fn format_single_dossier_terminal(d: &TicketDossier) -> String {
     if !d.catalog_variables.is_empty() {
         out.push_str("\nCATALOG VARIABLES:\n");
         for var in &d.catalog_variables {
-            out.push_str(&format!("  - {}: {}\n", var.question, var.value));
+            out.push_str(&format!(
+                "  - {}: {}\n",
+                var.question,
+                catalog_value_text(var)
+            ));
         }
     }
 
@@ -1216,6 +1450,146 @@ mod tests {
         assert_eq!(
             dossier.activity_stream.entries[0].body,
             "Fetched via concurrent GET fallback."
+        );
+    }
+    #[tokio::test]
+    async fn catalog_reference_variables_show_display_values_or_stay_raw() {
+        // CT-42, CT-68 (DOS-1; NA-13)
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_number"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": [] })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sc_req_item"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "sys_id": { "value": "ritm_sys_42", "display_value": "ritm_sys_42" },
+                    "number": { "value": "RITM0000042", "display_value": "RITM0000042" },
+                    "sys_class_name": { "value": "sc_req_item", "display_value": "Requested Item" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let known = "42424242424242424242424242424242";
+        let gone = "43434343434343434343434343434343";
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "sys_id": { "value": known, "display_value": known },
+                    "name": { "value": "Pat Example", "display_value": "Pat Example" }
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let var = |q: &str, ty: &str, value: &str| {
+            json!({
+                "sc_item_option.item_option_new": { "value": q, "display_value": q },
+                "sc_item_option.value": { "value": value, "display_value": value },
+                "sc_item_option.item_option_new.type": { "value": ty, "display_value": ty },
+                "sc_item_option.item_option_new.reference": { "value": "sys_user", "display_value": "User" }
+            })
+        };
+        let vars_b64 = BASE64_STANDARD.encode(
+            json!({ "result": [
+                var("Requested for", "8", known),
+                var("Manager", "8", gone),
+                var("Smuggled", "8", "x^ORactive=true"),
+                var("Notes", "2", "plain text"),
+            ]})
+            .to_string(),
+        );
+        let empty_b64 = BASE64_STANDARD.encode(json!({ "result": [] }).to_string());
+        Mock::given(method("POST"))
+            .and(path("/api/now/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "serviced_requests": [
+                    { "id": "journal", "status_code": 200, "body": empty_b64 },
+                    { "id": "catalog_vars", "status_code": 200, "body": vars_b64 },
+                    { "id": "child_tasks", "status_code": 200, "body": empty_b64 },
+                    { "id": "approvals", "status_code": 200, "body": empty_b64 },
+                    { "id": "impacted_cis", "status_code": 200, "body": empty_b64 },
+                    { "id": "attachments", "status_code": 200, "body": empty_b64 }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        let args = ShowArgs {
+            tickets: vec!["RITM0000042".to_string()],
+            all_fields: false,
+            fields: vec![],
+            no_journal: false,
+            no_related: false,
+        };
+        let d = assemble_ticket_dossier(&client, &cache, &args, "RITM0000042")
+            .await
+            .expect("dossier");
+        let by_q = |q: &str| {
+            d.catalog_variables
+                .iter()
+                .find(|v| v.question == q)
+                .expect(q)
+                .clone()
+        };
+        let resolved = by_q("Requested for");
+        assert_eq!(resolved.value, "Pat Example");
+        assert_eq!(resolved.raw_value.as_deref(), Some(known));
+        let missing = by_q("Manager");
+        assert_eq!(missing.value, gone);
+        assert_eq!(missing.unresolved_reference.as_deref(), Some("sys_user"));
+        let smuggled = by_q("Smuggled");
+        assert_eq!(smuggled.value, "x^ORactive=true");
+        assert_eq!(smuggled.unresolved_reference.as_deref(), Some("sys_user"));
+        assert_eq!(by_q("Notes").unresolved_reference, None);
+
+        let lookups: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path() == "/api/now/table/sys_user")
+            .map(|r| r.url.query().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(lookups.len(), 1, "{lookups:?}");
+        assert!(lookups[0].contains(known) && lookups[0].contains(gone));
+        assert!(
+            !lookups[0].contains("active"),
+            "no smuggled term: {}",
+            lookups[0]
+        );
+
+        let mut d = d;
+        d.activity_stream.entries.push(JournalEntry {
+            element: "comments".to_string(),
+            author: "a\u{1b}[2J".to_string(),
+            timestamp: "2026-10-28 10:00:00".to_string(),
+            body: "ok\n## Fake heading\u{1b}[31m".to_string(),
+        });
+        let md = format_ticket_dossiers(&[d.clone()], ResolvedOutputFormat::Md);
+        assert!(
+            md.contains(&format!("{gone} (unresolved reference to sys_user)")),
+            "{md}"
+        );
+        assert!(!md.contains('\u{1b}'), "no ESC in md: {md}");
+        assert!(md.contains("```text\nok\n## Fake heading[31m\n```"), "{md}");
+        // OSC 8 links use ESC legitimately; instance text never does.
+        let tty = format_ticket_dossiers(&[d], ResolvedOutputFormat::TerminalDossier);
+        assert!(
+            !tty.contains("\u{1b}[2J") && !tty.contains("\u{1b}[31m"),
+            "{tty}"
         );
     }
 }
