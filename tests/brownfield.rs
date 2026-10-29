@@ -1012,3 +1012,40 @@ async fn approvals_list_includes_group_linked_rows_once() {
     );
     assert!(all.json()["group_query"].is_null());
 }
+
+#[tokio::test]
+async fn agent_comments_and_notes_carry_the_pack_marker() {
+    // CT-38 (SAFE-8, NA-12): the harness runs with --no-interactive and a non-TTY stdin.
+    let corp = ExampleCorp::start().await;
+    let note = corp.run(&["--json", "note", "INC0012345", "Rebooted the VPN gateway"]);
+    assert_eq!(note.code, 0, "{}", note.stderr);
+    let diff = &note.json()["diffs"][0];
+    assert_eq!(
+        diff["after_value"],
+        "[sncfr-agent] Rebooted the VPN gateway"
+    );
+    assert_eq!(diff["source"], "input + marker");
+
+    let update = corp.run(&["--json", "update", "INC0012345", "--comment", "Fixed"]);
+    assert_eq!(update.code, 0, "{}", update.stderr);
+    assert_eq!(
+        update.json()["diffs"][0]["after_value"],
+        "[sncfr-agent] Fixed"
+    );
+
+    let code = corp.run(&["note", "INC0012345", "[code]<b>x</b>[/code]"]);
+    assert_eq!(code.code, 2, "{}", code.stderr);
+    let allowed = corp.run(&[
+        "note",
+        "INC0012345",
+        "[code]<b>x</b>[/code]",
+        "--allow-code-tag",
+    ]);
+    assert_eq!(allowed.code, 0, "{}", allowed.stderr);
+    assert!(
+        allowed.stderr.contains("[code]"),
+        "warned: {}",
+        allowed.stderr
+    );
+    assert!(corp.mutating_requests().await.is_empty());
+}

@@ -80,6 +80,26 @@ pub struct ProfileConfig {
     /// Per-request timeout in seconds (1-300); `--timeout` / `SNCFR_TIMEOUT` override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// `"always"` applies the pack's agent write marker even in interactive use (SAFE-8).
+    #[serde(default, skip_serializing_if = "AgentMarkerMode::is_auto")]
+    pub agent_marker: AgentMarkerMode,
+}
+
+/// When the pack's `audit.agent_write_marker` is applied (SAFE-8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMarkerMode {
+    /// Only for non-interactive invocations.
+    #[default]
+    Auto,
+    /// On every comment and work note.
+    Always,
+}
+
+impl AgentMarkerMode {
+    pub const fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
 }
 
 /// Top-level `config.toml` representation (`docs/SPEC.md` Section 7.1).
@@ -116,6 +136,8 @@ pub struct ResolvedProfile {
     pub pack_locked: bool,
     /// Profile `timeout_secs`, if set.
     pub timeout_secs: Option<u64>,
+    /// Profile `agent_marker`.
+    pub agent_marker: AgentMarkerMode,
 }
 
 impl ResolvedProfile {
@@ -379,6 +401,7 @@ impl AppConfig {
                         .transpose()?,
                     pack_locked: profile_cfg.pack_locked,
                     timeout_secs: profile_cfg.timeout_secs,
+                    agent_marker: profile_cfg.agent_marker,
                 });
             } else if cli.profile.is_some() && cli.instance.is_none() {
                 let available: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
@@ -413,6 +436,7 @@ impl AppConfig {
                 pack_path: None,
                 pack_locked: false,
                 timeout_secs: None,
+                agent_marker: AgentMarkerMode::Auto,
             });
         }
 
