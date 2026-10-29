@@ -109,6 +109,20 @@ pub struct MutationReport {
     /// Merged Instance Pack headline (`<name> <version> · <status> · sha256:…`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack: Option<String>,
+    /// Requested items created by a catalog order (CAT-2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<OrderedItem>,
+    /// Non-fatal notes (e.g. RITM polling timed out); the command still succeeded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// One `sc_req_item` created by a catalog order (CAT-2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedItem {
+    pub sys_id: String,
+    pub number: String,
+    pub cat_item: String,
 }
 
 /// What the write gate did for one invocation.
@@ -1163,6 +1177,19 @@ fn gate_notes(report: &MutationReport, terminal: bool) -> String {
     let mut out = String::new();
     if let Some(pack) = &report.pack {
         out.push_str(&format!("\nPack: {}\n", clean(pack)));
+    }
+    if !report.items.is_empty() {
+        out.push_str("\nRequested items:\n");
+        for i in &report.items {
+            out.push_str(&format!(
+                "  {} (sys_id {})\n",
+                clean(&i.number),
+                clean(&i.sys_id)
+            ));
+        }
+    }
+    for w in &report.warnings {
+        out.push_str(&format!("\n⚠ {}\n", clean(w)));
     }
     if !report.unverifiable_fields.is_empty() {
         out.push_str(&format!(

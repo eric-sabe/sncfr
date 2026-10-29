@@ -10,7 +10,8 @@ use crate::client::write_gate::{ResolvedField, Target, VerifiedMutation};
 use crate::client::{ReadOnlyClient, WritePermit, extract_field_display, extract_field_value};
 use crate::error::SncfrError;
 use crate::mutate::{
-    FieldDiff, MutationReport, parse_key_value_pair, resolve_user_reference, run_gate, shell_quote,
+    FieldDiff, MutationReport, OrderedItem, parse_key_value_pair, resolve_user_reference, run_gate,
+    shell_quote,
 };
 use crate::output::ResolvedOutputFormat;
 use crate::resolve::is_sys_id;
@@ -645,6 +646,105 @@ async fn resolve_reference_value(
     }
 }
 
+/// How long to wait for an order's requested items (CAT-2): backoff from `initial`, doubling,
+/// capped at `cap` per wait and `max_wait` in total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollPolicy {
+    pub initial: std::time::Duration,
+    pub cap: std::time::Duration,
+    pub max_wait: std::time::Duration,
+}
+
+impl PollPolicy {
+    /// `--poll-timeout`, else pack `catalog.poll.max_wait_secs`, else 20 s; backoff from pack
+    /// `initial_backoff_ms`, else 500 ms.
+    pub fn resolve(pack: &crate::pack::MergedPack, poll_timeout: Option<u64>) -> Self {
+        let poll = pack.catalog.poll.clone().unwrap_or_default();
+        let max = poll_timeout.unwrap_or_else(|| u64::from(poll.max_wait_secs.unwrap_or(20)));
+        Self {
+            initial: std::time::Duration::from_millis(u64::from(
+                poll.initial_backoff_ms.unwrap_or(500),
+            )),
+            cap: std::time::Duration::from_secs(4),
+            max_wait: std::time::Duration::from_secs(max),
+        }
+    }
+}
+
+/// Polls `sc_req_item?request=<req>` until it returns rows or the policy's total wait is spent.
+/// A timeout or an unreadable table is a warning, never an error (CAT-2).
+pub async fn poll_requested_items(
+    client: &ReadOnlyClient,
+    request_sys_id: &str,
+    policy: PollPolicy,
+) -> (Vec<OrderedItem>, Option<String>) {
+    if !is_sys_id(request_sys_id) {
+        return (
+            Vec::new(),
+            Some(
+                "The order response carried no request sys_id; requested items were not polled."
+                    .to_string(),
+            ),
+        );
+    }
+    let q = format!("request={request_sys_id}");
+    let mut waited = std::time::Duration::ZERO;
+    let mut wait = policy.initial;
+    loop {
+        if waited + wait > policy.max_wait {
+            return (
+                Vec::new(),
+                Some(format!(
+                    "No requested item appeared within {}s; check the request later with `sncfr list --table sc_req_item`.",
+                    policy.max_wait.as_secs()
+                )),
+            );
+        }
+        tokio::time::sleep(wait).await;
+        waited += wait;
+        wait = (wait * 2).min(policy.cap);
+        match client
+            .get_json::<Value>(
+                "/api/now/table/sc_req_item",
+                &[
+                    ("sysparm_query", q.as_str()),
+                    ("sysparm_fields", "sys_id,number,cat_item"),
+                    ("sysparm_limit", "50"),
+                ],
+            )
+            .await
+        {
+            Ok(resp) => {
+                let items: Vec<OrderedItem> = resp
+                    .get("result")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| {
+                        Some(OrderedItem {
+                            sys_id: extract_field_value(r, "sys_id")?,
+                            number: extract_field_display(r, "number").unwrap_or_default(),
+                            cat_item: extract_field_value(r, "cat_item").unwrap_or_default(),
+                        })
+                    })
+                    .collect();
+                if !items.is_empty() {
+                    return (items, None);
+                }
+            }
+            Err(e) => {
+                return (
+                    Vec::new(),
+                    Some(format!(
+                        "Requested items could not be read ({}).",
+                        e.code().as_str()
+                    )),
+                );
+            }
+        }
+    }
+}
+
 /// Executes `sncfr catalog order <item_sys_id> [--var k=v...] [--write]`.
 pub async fn execute_catalog_order(
     client: ReadOnlyClient,
@@ -752,6 +852,7 @@ pub async fn execute_catalog_order(
         order_payload,
         &variables,
     );
+    let reader = client.clone();
     let gate = run_gate(client, permit, vec![mutation]).await?;
     let mut report = MutationReport {
         operation: "catalog_order".to_string(),
@@ -768,6 +869,12 @@ pub async fn execute_catalog_order(
         report.table = "sc_request".to_string();
         report.sys_id =
             extract_field_value(res, "request_id").or_else(|| extract_field_value(res, "sys_id"));
+        // CAT-2: wait for the requested items.
+        let policy = PollPolicy::resolve(crate::pack::active(), args.poll_timeout);
+        let req = report.sys_id.clone().unwrap_or_default();
+        let (items, warning) = poll_requested_items(&reader, &req, policy).await;
+        report.items = items;
+        report.warnings.extend(warning);
     }
     gate.fill(&mut report);
     Ok(report)
@@ -857,6 +964,7 @@ mod tests {
             quantity: 1,
             requested_for: None,
             write: false,
+            poll_timeout: None,
         }
     }
 
@@ -924,5 +1032,83 @@ mod tests {
             .expect("model");
         assert_eq!(model.after_value, "power");
         assert_eq!(model.source.as_deref(), Some("sys_choice"));
+    }
+
+    #[tokio::test]
+    async fn requested_items_are_polled_with_backoff_and_a_timeout_only_warns() {
+        // CT-39 (CAT-2)
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct ThirdPoll(AtomicUsize);
+        impl wiremock::Respond for ThirdPoll {
+            fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+                let n = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+                let rows = if n >= 3 {
+                    json!([{ "sys_id": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1", "number": "RITM0050001", "cat_item": ITEM }])
+                } else {
+                    json!([])
+                };
+                ResponseTemplate::new(200).set_body_json(json!({ "result": rows }))
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sc_req_item"))
+            .respond_with(ThirdPoll(AtomicUsize::new(0)))
+            .mount(&server)
+            .await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let fast = PollPolicy {
+            initial: std::time::Duration::from_millis(5),
+            cap: std::time::Duration::from_millis(20),
+            max_wait: std::time::Duration::from_millis(500),
+        };
+        let req = "abababababababababababababababab";
+        let (items, warning) = poll_requested_items(&client, req, fast).await;
+        assert_eq!(warning, None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].number, "RITM0050001");
+        let polls = server.received_requests().await.unwrap_or_default().len();
+        assert_eq!(polls, 3, "appears on the 3rd poll");
+
+        let none = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sc_req_item"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": [] })))
+            .mount(&none)
+            .await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&none.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let tiny = PollPolicy {
+            max_wait: std::time::Duration::from_millis(40),
+            ..fast
+        };
+        let (items, warning) = poll_requested_items(&client, req, tiny).await;
+        assert!(items.is_empty());
+        assert!(
+            warning
+                .expect("warning")
+                .contains("No requested item appeared")
+        );
+
+        let pack = crate::pack::ootb_merged();
+        let p = PollPolicy::resolve(&pack, None);
+        assert_eq!(
+            (p.initial.as_millis(), p.cap.as_secs(), p.max_wait.as_secs()),
+            (500, 4, 20)
+        );
+        assert_eq!(PollPolicy::resolve(&pack, Some(5)).max_wait.as_secs(), 5);
     }
 }
