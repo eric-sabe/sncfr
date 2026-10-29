@@ -104,9 +104,54 @@ pub enum Scenario {
     InUseOotbLow,
     /// `/api/now/stats/*` answers 403.
     StatsUnauthorized,
+    /// `sysapproval_approver` answers the `approver=<me>` query with two rows and the
+    /// `group.assignment_groupIN…` query with two rows, one of them shared (`approvals.json`).
+    LinkedApprovals,
     /// `task` answers with recent rows (`number`, `sys_class_name`): three `ABC-` rows on
     /// `u_abc_request`, two `INC` rows (`task_sample.json`).
     TaskSample,
+}
+
+/// `sysapproval_approver` rows keyed by which linkage predicate the query carries.
+struct LinkedApprovals(Value);
+
+impl Respond for LinkedApprovals {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let q = req
+            .url
+            .query_pairs()
+            .find(|(k, _)| k == "sysparm_query")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        let key = if q.contains("group.assignment_groupIN") {
+            "group"
+        } else if q.contains(&format!("approver={ME_SYS_ID}")) {
+            "user"
+        } else {
+            ""
+        };
+        let rows: Vec<Value> = self.0[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                let mut row = json!({
+                    "sys_id": { "value": r["sys_id"], "display_value": r["sys_id"] },
+                    "state": { "value": "requested", "display_value": "Requested" },
+                    "approver": { "value": ME_SYS_ID, "display_value": "Pat Example" },
+                    "sysapproval": { "value": "t", "display_value": r["target"] },
+                    "sys_created_on": { "value": r["created"], "display_value": r["created"] },
+                    "sys_updated_on": { "value": r["created"], "display_value": r["created"] },
+                });
+                if let Some(g) = r["group"].as_str() {
+                    row["group"] = json!({ "value": "g", "display_value": g });
+                    row["approver"] = json!({ "value": "", "display_value": "" });
+                }
+                row
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "result": rows }))
+    }
 }
 
 /// `/api/now/stats/<table>?sysparm_group_by=<field>` against one `in_use.json` set (incident only).
@@ -295,6 +340,13 @@ impl ExampleCorp {
                 Mock::given(method("GET"))
                     .and(wiremock::matchers::path_regex("^/api/now/stats/"))
                     .respond_with(InUseStats(fixture("in_use.json")[key].clone()))
+                    .mount(&self.server)
+                    .await;
+            }
+            Scenario::LinkedApprovals => {
+                Mock::given(method("GET"))
+                    .and(path("/api/now/table/sysapproval_approver"))
+                    .respond_with(LinkedApprovals(fixture("approvals.json")))
                     .mount(&self.server)
                     .await;
             }
