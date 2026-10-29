@@ -169,6 +169,51 @@ fn section_status(sub: &crate::client::ServicedSubResponse) -> SectionStatus {
     }
 }
 
+fn is_custom_field(name: &str) -> bool {
+    name.starts_with("u_") || name.starts_with("x_")
+}
+
+/// Fields shown for a non-task record when the pack names none (DOS-2).
+const NON_TASK_DEFAULT_FIELDS: [&str; 4] = ["sys_id", "name", "sys_class_name", "sys_updated_on"];
+
+/// Whether `table` derives from `task`: the pack hierarchy says so, or, for a table the pack
+/// does not know, the record carries the task fields `number` and `opened_at`.
+fn is_task_derived(pack: &crate::pack::MergedPack, table: &str, record: &Value) -> bool {
+    let lineage = pack.lineage(table);
+    if lineage.iter().any(|t| t == "task") {
+        return true;
+    }
+    lineage.len() == 1 && record.get("number").is_some() && record.get("opened_at").is_some()
+}
+
+/// DOS-2 default `show` fields, before the non-empty `u_*` / `x_*` fields every dossier adds:
+/// - task-derived tables: the curated core fields, then the pack's `fields.default.<t>.dossier`
+///   (nearest along the hierarchy);
+/// - other tables: that pack list, else `sys_id, name, sys_class_name, sys_updated_on`.
+pub fn default_dossier_fields(
+    pack: &crate::pack::MergedPack,
+    table: &str,
+    record: &Value,
+) -> Vec<String> {
+    let pack_fields = pack.default_fields(table, true).unwrap_or_default();
+    let mut out: Vec<String> = if is_task_derived(pack, table, record) {
+        pack.core.dossier_core_fields.clone()
+    } else if pack_fields.is_empty() {
+        NON_TASK_DEFAULT_FIELDS
+            .iter()
+            .map(|f| (*f).to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for f in pack_fields {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    out
+}
+
 /// Assembles a [`TicketDossier`] for a single ticket identifier using a composite `/api/now/batch` request.
 pub async fn assemble_ticket_dossier(
     client: &ReadOnlyClient,
@@ -207,15 +252,22 @@ pub async fn assemble_ticket_dossier(
             }
         }
     } else {
-        for field_name in &crate::pack::active().core.dossier_core_fields {
-            if let Some((disp, raw)) = extract_field_pair(&resolved.record, field_name) {
-                core_fields.insert(field_name.to_string(), FieldValue::from_pair(disp, raw));
+        let pack = crate::pack::active();
+        for field_name in default_dossier_fields(pack, &resolved.table, &resolved.record) {
+            if let Some((disp, raw)) = extract_field_pair(&resolved.record, &field_name) {
+                let target = if is_custom_field(&field_name) {
+                    &mut custom_fields
+                } else {
+                    &mut core_fields
+                };
+                target.insert(field_name, FieldValue::from_pair(disp, raw));
             }
         }
         if let Some(obj) = resolved.record.as_object() {
             for k in obj.keys() {
-                if (k.starts_with("u_") || k.starts_with("x_"))
+                if is_custom_field(k)
                     && let Some((disp, raw)) = extract_field_pair(&resolved.record, k)
+                    && !(disp.is_empty() && raw.is_empty())
                 {
                     custom_fields.insert(k.clone(), FieldValue::from_pair(disp, raw));
                 }
@@ -857,6 +909,33 @@ fn format_single_dossier_terminal(d: &TicketDossier) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_task_records_get_table_aware_default_fields() {
+        // CT-43 (DOS-2)
+        let pack = crate::pack::ootb_merged();
+        let server = serde_json::json!({
+            "sys_id": { "value": "c1", "display_value": "c1" },
+            "name": { "value": "web-01", "display_value": "web-01" },
+            "sys_class_name": { "value": "cmdb_ci_server", "display_value": "Server" },
+            "short_description": { "value": "x", "display_value": "x" },
+        });
+        let fields = default_dossier_fields(&pack, "cmdb_ci_server", &server);
+        assert_eq!(fields, NON_TASK_DEFAULT_FIELDS.map(String::from).to_vec());
+        for task_core in ["priority", "assignment_group", "caller_id", "close_code"] {
+            assert!(!fields.iter().any(|f| f == task_core), "{task_core}");
+        }
+
+        let incident = default_dossier_fields(&pack, "incident", &serde_json::json!({}));
+        assert!(incident.iter().any(|f| f == "assignment_group"));
+        // A table the pack does not know, but whose record is a task.
+        let custom_task = serde_json::json!({ "number": {}, "opened_at": {} });
+        assert!(
+            default_dossier_fields(&pack, "u_sec_case", &custom_task)
+                .iter()
+                .any(|f| f == "priority")
+        );
+    }
     use crate::client::ClientAuth;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
