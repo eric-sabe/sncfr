@@ -255,15 +255,7 @@ fn default_draft_path(host: &str) -> Result<PathBuf, SncfrError> {
 
 /// Fields listed in `discovery.choice_fields` for `table` and its ancestors.
 fn listed_fields(pack: &MergedPack, table: &str, super_class: Option<&str>) -> Vec<String> {
-    let mut lineage = vec![table.to_string()];
-    let mut cur = table.to_string();
-    while let Some(parent) = pack.hierarchy.get(&cur).map(|p| p.value.clone()) {
-        if lineage.contains(&parent) {
-            break;
-        }
-        lineage.push(parent.clone());
-        cur = parent;
-    }
+    let mut lineage = pack.lineage(table);
     if let Some(sc) = super_class
         && !lineage.iter().any(|t| t == sc)
     {
