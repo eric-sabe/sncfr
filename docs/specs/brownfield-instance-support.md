@@ -60,7 +60,7 @@ The aim is generic mechanisms (packs, discovery, an agent skill overlay) that le
 - The ticket parser rejects `ABC-1234567` and upper-cases the number it sends (`src/resolve.rs:31-46`). A 403 on a known-prefix table becomes NOT_FOUND (`src/resolve.rs:239,258`).
 - Approvals are user-linked only. Catalog `show`/`order` have no fallback, and `order` returns only the REQ.
 - SKILL.md embeds the user's display name and group names unsanitized (`src/skill.rs:45-56`).
-- CI runs only fmt, clippy, and tests. There is no CONTRIBUTING.md, fixtures use `acme.service-now.com`, SPEC says v0.1.0 and calls `/api/now/batch` "enabled by default", and ADR-0001 doesn't describe the ephemeral CDP port that is already implemented (`src/auth.rs:1167`).
+- CI runs only fmt, clippy, and tests. There is no CONTRIBUTING.md, fixtures use a non-allowlisted `acme` example hostname, SPEC says v0.1.0 and calls `/api/now/batch` "enabled by default", and ADR-0001 doesn't describe the ephemeral CDP port that is already implemented (`src/auth.rs:1167`).
 
 Where the built-in defaults live today:
 
@@ -1297,7 +1297,7 @@ Any assertion change is a BF-TEST-3 violation.
 | CT-45d | Group name with U+E0041 and U+202E | stripped in SKILL.md | `src/untrusted.rs` |
 | CT-46 | `skill install --overlay`; target inside an unignored git worktree | marker + hash present, idempotent; worktree case needs `--force` (SKILL-1) | `src/skill.rs` |
 | CT-47 | `cmdb lookup 10.0.0.5`; a hostname with 2 matches | IP path returns support group + open tasks; duplicate → `ambiguous: true` (WF-1) | `tests/brownfield.rs` |
-| CT-50 | leakcheck on `realco.service-now.com`, `notexample.service-now.com`, `REALCO.SERVICE-NOW.COM`, `agency.servicenowservices.com`; denylist hit | all fail; `example`/`mycompany` pass; the CI log never contains the denylist term (NA-11) | `scripts/leakcheck.sh` self-test + CI |
+| CT-50 | leakcheck on hosts `realco`, `notexample`, upper-case `REALCO` (all under `service-now.com`) and `agency` under `servicenowservices.com`; a denylist hit; a host in a commit message (the self-test assembles these at runtime so the repo never contains them) | all fail; `example`/`mycompany` pass; the CI log never contains the denylist term (NA-11) | `scripts/leakcheck.sh` self-test + CI |
 | CT-60 | Ticket with my `rejected` approval and another user's `requested` approval | `approve --write` exit 5, zero PATCH (NA-15) | `src/workflows.rs` |
 | CT-61 | Two `requested` approvals linked to me (user + group) | exit 2 with candidates, zero PATCH | `src/workflows.rs` |
 | CT-62 | `sn_sc` 401 + Table API 200 + `order --write` | exit 4, zero POST of any kind (NA-16) | `tests/brownfield.rs` |

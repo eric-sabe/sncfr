@@ -2156,26 +2156,30 @@ mod tests {
         let store = CredentialStore::File(cred_file);
 
         let creds = StoredCredentials::new(
-            "https://acme.service-now.com",
+            "https://example.service-now.com",
             CredentialPayload::SsoSession {
                 cookie: "JSESSIONID=abc".to_string(),
                 user_token: Some("tok123".to_string()),
             },
         );
         store
-            .save("acme.service-now.com", &creds)
+            .save("example.service-now.com", &creds)
             .expect("save creds");
 
         let loaded = store
-            .load("acme.service-now.com")
+            .load("example.service-now.com")
             .expect("load creds")
             .expect("creds present");
         assert_eq!(loaded.payload, creds.payload);
 
-        assert!(store.delete("acme.service-now.com").expect("delete creds"));
         assert!(
             store
-                .load("acme.service-now.com")
+                .delete("example.service-now.com")
+                .expect("delete creds")
+        );
+        assert!(
+            store
+                .load("example.service-now.com")
                 .expect("load after delete")
                 .is_none()
         );
@@ -2321,7 +2325,7 @@ mod tests {
     #[test]
     fn context_aware_auto_reauth_respects_tty_and_no_interactive() {
         use clap::Parser;
-        let cli = Cli::try_parse_from(["sncfr", "list", "--instance", "acme"]).expect("cli");
+        let cli = Cli::try_parse_from(["sncfr", "list", "--instance", "example"]).expect("cli");
         let profile = AppConfig::default().resolve_profile(&cli).expect("profile");
 
         assert!(can_auto_reauth(&cli, &profile, true, true));
@@ -2329,7 +2333,7 @@ mod tests {
         assert!(!can_auto_reauth(&cli, &profile, true, false));
 
         let non_interactive_cli =
-            Cli::try_parse_from(["sncfr", "--no-interactive", "list", "--instance", "acme"])
+            Cli::try_parse_from(["sncfr", "--no-interactive", "list", "--instance", "example"])
                 .expect("cli no-interactive");
         assert!(!can_auto_reauth(&non_interactive_cli, &profile, true, true));
     }

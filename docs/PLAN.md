@@ -89,6 +89,7 @@
 
 - **Design spec (Tier L)**: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md). It holds the normative requirement IDs, the contracts, the `NA-*` security invariants, the `CT-*` test table, and the full phase/issue breakdown.
 - **Delivery**: one phase = one PR to `main`, and one issue = one commit. `main` carries `0.2.0-dev` until P10 tags `v0.2.0`.
+- **Progress**: H ✅ (0.1.6, tags `v0.1.5`/`v0.1.6`) · P0 in review
 
 | Milestone | Phases | Requirements |
 |---|---|---|

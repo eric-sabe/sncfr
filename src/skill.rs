@@ -129,7 +129,7 @@ sncfr list --mine --active\n\n\
 sncfr list --group @my-groups --active --priority 1,2\n\
 sncfr list @team-triage\n\n\
 # Parse any pasted ServiceNow browser URL directly into a structured list:\n\
-sncfr list --from-url \"https://instance.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3Dactive%3Dtrue\"\n\n\
+sncfr list --from-url \"https://mycompany.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3Dactive%3Dtrue\"\n\n\
 # Full-text search combined with filters:\n\
 sncfr search \"VPN gateway timeout\" --table inc --updated-since 7d\n\n\
 # Activity feed / delta monitor across a queue (new comments, work notes, state changes):\n\

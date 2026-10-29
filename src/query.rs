@@ -257,12 +257,12 @@ pub struct ParsedServiceNowUrl {
 /// Parses a pasted ServiceNow browser or API URL into its target table and encoded query.
 ///
 /// Supports:
-/// 1. Classic list URLs: `https://acme.service-now.com/incident_list.do?sysparm_query=active%3Dtrue`
+/// 1. Classic list URLs: `https://example.service-now.com/incident_list.do?sysparm_query=active%3Dtrue`
 /// 2. Classic `nav_to.do?uri=...` wrapper URLs
-/// 3. Next Experience (`Polaris`) URLs: `https://acme.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3D...`
-/// 4. Classic record form URLs: `https://acme.service-now.com/incident.do?sys_id=...`
-/// 5. Service Portal ticket URLs: `https://acme.service-now.com/sp?id=ticket&table=incident&sys_id=...`
-/// 6. REST Table API URLs: `https://acme.service-now.com/api/now/table/incident?sysparm_query=...`
+/// 3. Next Experience (`Polaris`) URLs: `https://example.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3D...`
+/// 4. Classic record form URLs: `https://example.service-now.com/incident.do?sys_id=...`
+/// 5. Service Portal ticket URLs: `https://example.service-now.com/sp?id=ticket&table=incident&sys_id=...`
+/// 6. REST Table API URLs: `https://example.service-now.com/api/now/table/incident?sysparm_query=...`
 pub fn parse_servicenow_url(raw_url: &str) -> Result<ParsedServiceNowUrl, SncfrError> {
     let trimmed = raw_url.trim();
     if trimmed.is_empty() {
@@ -285,7 +285,7 @@ pub fn parse_servicenow_url(raw_url: &str) -> Result<ParsedServiceNowUrl, SncfrE
             (Some(base), u)
         } else {
             let synthetic = format!(
-                "https://placeholder.service-now.com/{}",
+                "https://example.service-now.com/{}",
                 trimmed.trim_start_matches('/')
             );
             let u = Url::parse(&synthetic).map_err(|e| SncfrError::InvalidArgs {
@@ -300,7 +300,7 @@ pub fn parse_servicenow_url(raw_url: &str) -> Result<ParsedServiceNowUrl, SncfrE
     if let Some(encoded_target) = path.strip_prefix("/now/nav/ui/classic/params/target/") {
         let decoded_target = percent_decode(encoded_target);
         let inner_url = format!(
-            "https://placeholder.service-now.com/{}",
+            "https://example.service-now.com/{}",
             decoded_target.trim_start_matches('/')
         );
         let mut result = parse_servicenow_url(&inner_url)?;
@@ -313,7 +313,7 @@ pub fn parse_servicenow_url(raw_url: &str) -> Result<ParsedServiceNowUrl, SncfrE
         && let Some((_, uri_val)) = parsed.query_pairs().find(|(k, _)| k == "uri")
     {
         let inner_url = format!(
-            "https://placeholder.service-now.com/{}",
+            "https://example.service-now.com/{}",
             uri_val.trim_start_matches('/')
         );
         let mut result = parse_servicenow_url(&inner_url)?;
@@ -669,7 +669,7 @@ mod tests {
     fn parses_classic_nav_to_and_next_experience_servicenow_urls() {
         // 1. Classic list URL
         let classic = parse_servicenow_url(
-            "https://acme.service-now.com/incident_list.do?sysparm_query=priority%3D1%5Eactive%3Dtrue%5EEQ&sysparm_view=itil",
+            "https://example.service-now.com/incident_list.do?sysparm_query=priority%3D1%5Eactive%3Dtrue%5EEQ&sysparm_view=itil",
         )
         .expect("classic url");
         assert_eq!(classic.table, "incident");
@@ -678,7 +678,7 @@ mod tests {
 
         // 2. Classic nav_to.do wrapper URL
         let nav_to = parse_servicenow_url(
-            "https://acme.service-now.com/nav_to.do?uri=%2Fsc_req_item_list.do%3Fsysparm_query%3Dactive%3Dtrue%26sysparm_view%3Dess",
+            "https://example.service-now.com/nav_to.do?uri=%2Fsc_req_item_list.do%3Fsysparm_query%3Dactive%3Dtrue%26sysparm_view%3Dess",
         )
         .expect("nav_to url");
         assert_eq!(nav_to.table, "sc_req_item");
@@ -687,7 +687,7 @@ mod tests {
 
         // 3. Next Experience (Polaris) URL
         let polaris = parse_servicenow_url(
-            "https://acme.service-now.com/now/nav/ui/classic/params/target/change_request_list.do%3Fsysparm_query%3Dstate%3D-5%5Eactive%3Dtrue%26sysparm_first_row%3D1",
+            "https://example.service-now.com/now/nav/ui/classic/params/target/change_request_list.do%3Fsysparm_query%3Dstate%3D-5%5Eactive%3Dtrue%26sysparm_first_row%3D1",
         )
         .expect("polaris url");
         assert_eq!(polaris.table, "change_request");
@@ -695,7 +695,7 @@ mod tests {
 
         // 4. Single record form URL
         let form = parse_servicenow_url(
-            "https://acme.service-now.com/incident.do?sys_id=6816f79cc0a8016401c5a33be04be441",
+            "https://example.service-now.com/incident.do?sys_id=6816f79cc0a8016401c5a33be04be441",
         )
         .expect("form url");
         assert_eq!(form.table, "incident");

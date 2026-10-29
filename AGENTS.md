@@ -28,6 +28,7 @@
   - [`docs/adr/0001-cdp-isolated-browser-sso.md`](docs/adr/0001-cdp-isolated-browser-sso.md) — Corporate SSO via CDP-driven isolated managed browser window + OS Keychain.
   - [`docs/adr/0002-read-only-default-validated-dry-run.md`](docs/adr/0002-read-only-default-validated-dry-run.md) — Compile-time Read-Only safety gate & Validated Dry-Run Previews.
   - [`docs/adr/0003-batch-api-ticket-dossier-and-acl-degradation.md`](docs/adr/0003-batch-api-ticket-dossier-and-acl-degradation.md) — Single-roundtrip `/api/now/batch` Ticket Dossier and graceful partial ACL degradation.
+  - [`docs/adr/0004-instance-packs.md`](docs/adr/0004-instance-packs.md) — Instance Packs: per-instance facts layered over a bundled `ootb` pack, with strictest-union safety keys.
 
 ---
 

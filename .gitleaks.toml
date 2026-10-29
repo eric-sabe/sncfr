@@ -1,0 +1,12 @@
+# gitleaks configuration (HYG-1). Extends the default ruleset; allowlists only the fake
+# session tokens used by offline tests. Organization-specific terms are checked separately
+# by scripts/leakcheck.sh with a private denylist.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fictional X-UserToken values in offline auth tests"
+regexes = [
+  '''7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f''',
+  '''gck_0123456789abcdef0123456789abcdef''',
+]

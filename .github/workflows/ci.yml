@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every PR, including PRs stacked on other feature branches. Never pull_request_target.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -18,10 +18,12 @@ jobs:
     name: Verify Spec & Plan Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Check required living documentation files exist
         run: |
-          for f in AGENTS.md README.md docs/SPEC.md docs/PLAN.md; do
+          for f in AGENTS.md README.md docs/SPEC.md docs/PLAN.md docs/specs/brownfield-instance-support.md docs/adr/0004-instance-packs.md; do
             if [ ! -s "$f" ]; then
               echo "Missing or empty required documentation file: $f"
               exit 1
@@ -32,18 +34,86 @@ jobs:
     name: Rust Format, Clippy & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install system dependencies (libdbus for keyring on Linux)
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libdbus-1-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all-targets --all-features
+
+  leakcheck:
+    name: Leak & Hostname Scan
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.0
+      GITLEAKS_SHA256: 79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+      EVENT_NAME: ${{ github.event_name }}
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PUSH_BEFORE: ${{ github.event.before }}
+      PUSH_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compute commit range
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            range="$PR_BASE_SHA..$PR_HEAD_SHA"
+          elif [ -n "$PUSH_BEFORE" ] && ! echo "$PUSH_BEFORE" | grep -qE '^0+$'; then
+            range="$PUSH_BEFORE..$PUSH_SHA"
+          else
+            range="$PUSH_SHA~1..$PUSH_SHA"
+          fi
+          echo "RANGE=$range" >> "$GITHUB_ENV"
+      - name: Select leakcheck script (base-branch copy, never the PR head's)
+        run: |
+          if git cat-file -e origin/main:scripts/leakcheck.sh 2>/dev/null; then
+            git show origin/main:scripts/leakcheck.sh > "$RUNNER_TEMP/leakcheck.sh"
+            echo "leakcheck: base-branch copy"
+          else
+            cp scripts/leakcheck.sh "$RUNNER_TEMP/leakcheck.sh"
+            echo "bootstrap: head copy" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          chmod +x "$RUNNER_TEMP/leakcheck.sh"
+      - name: Leakcheck self-test
+        run: '"$RUNNER_TEMP/leakcheck.sh" --self-test'
+      - name: Materialize denylist from secret
+        env:
+          DENYLIST: ${{ secrets.LEAKCHECK_DENYLIST }}
+        run: |
+          if [ -z "$DENYLIST" ]; then
+            echo "denylist: SKIPPED (no secret)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          while IFS= read -r term; do
+            [ -n "$term" ] && echo "::add-mask::$term"
+          done <<< "$DENYLIST"
+          mkdir -p .leakcheck
+          printf '%s\n' "$DENYLIST" > .leakcheck/denylist.txt
+      - name: Hostname and denylist scan (tracked files + commit messages)
+        run: '"$RUNNER_TEMP/leakcheck.sh" --log "$RANGE"'
+      - name: Remove denylist
+        if: always()
+        run: rm -rf .leakcheck
+      - name: gitleaks (pinned release, checksum-verified, redacted)
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --config .gitleaks.toml --log-opts="$RANGE"

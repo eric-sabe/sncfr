@@ -47,6 +47,13 @@ If you just want the `sncfr` command on your `PATH` without managing a local Git
 cargo install --git https://github.com/eric-sabe/sncfr.git
 ```
 
+> [!IMPORTANT]
+> `main` is currently **0.2.0-dev** (brownfield instance support, in progress; see [`docs/specs/brownfield-instance-support.md`](docs/specs/brownfield-instance-support.md)). For the latest stable release, pin the tag:
+>
+> ```bash
+> cargo install --git https://github.com/eric-sabe/sncfr.git --tag v0.1.6
+> ```
+
 Cargo will download the source, compile an optimized release binary, and install it to `~/.cargo/bin/sncfr`. Verify it works:
 
 ```bash
@@ -87,7 +94,7 @@ cargo install --path .
 ## Testing
 
 ### 1. Offline Unit & End-to-End (`wiremock`) Test Suite
-The repository includes 43 unit tests and a full-binary `wiremock` E2E test suite ([`tests/e2e_cli.rs`](tests/e2e_cli.rs)) that exercises authentication, `doctor`, `show`, `list`, `stats`, dry-run validation, `--write` mutations, and `SNCFR_READ_ONLY=1` locks without requiring a live ServiceNow instance:
+The repository includes 48 unit tests and a full-binary `wiremock` E2E test suite ([`tests/e2e_cli.rs`](tests/e2e_cli.rs)) that exercises authentication, `doctor`, `show`, `list`, `stats`, dry-run validation, `--write` mutations, and `SNCFR_READ_ONLY=1` locks without requiring a live ServiceNow instance:
 
 ```bash
 # Run all unit and integration tests
@@ -103,12 +110,21 @@ See [`docs/TESTING.md`](docs/TESTING.md) for a step-by-step functional test plan
 
 ---
 
+## Behavior changes from 0.1.x
+
+Changes in 0.2.0 that existing users and agents will notice are listed here as they land on `main`.
+
+| Situation | 0.1.x | 0.2.0 |
+|---|---|---|
+
+---
+
 ## Quick Start
 
 ### 1. Authenticate via Corporate SSO & Probe Permissions
 ```bash
 # Launches an isolated --app window in your managed browser, captures session + g_ck token into OS Keychain, and closes automatically
-sncfr auth login --instance https://your-instance.service-now.com --profile prod
+sncfr auth login --instance https://mycompany.service-now.com --profile prod
 
 # Or import a "Copy as cURL" snippet from browser DevTools in headless environments
 pbpaste | sncfr auth import --profile prod
@@ -127,7 +143,7 @@ sncfr list --mine --active
 sncfr list --group @my-groups --active --updated-since 7d
 
 # Adopt any filtered list URL copied from the ServiceNow browser address bar
-sncfr list --from-url "https://your-instance.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3Dactive%3Dtrue"
+sncfr list --from-url "https://mycompany.service-now.com/now/nav/ui/classic/params/target/incident_list.do%3Fsysparm_query%3Dactive%3Dtrue"
 
 # Fast server-side counts grouped by state (/api/now/stats)
 sncfr stats --group @my-groups --active --by state
@@ -178,6 +194,7 @@ We manage our intent through living specifications, plans, and architecture deci
   - [ADR-0001: Corporate SSO via CDP-Driven Isolated Managed Browser Window](docs/adr/0001-cdp-isolated-browser-sso.md)
   - [ADR-0002: Compile-Time Read-Only Default and Validated Dry-Run Previews](docs/adr/0002-read-only-default-validated-dry-run.md)
   - [ADR-0003: Single-Roundtrip `/api/now/batch` Ticket Dossier & Graceful ACL Degradation](docs/adr/0003-batch-api-ticket-dossier-and-acl-degradation.md)
+  - [ADR-0004: Instance Packs for Brownfield ServiceNow Instances](docs/adr/0004-instance-packs.md)
 
 ---
 
