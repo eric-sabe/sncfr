@@ -131,6 +131,9 @@ enum Method {
 pub struct Target {
     method: Method,
     path: String,
+    /// A record that does not exist yet (CAT-3: the RITM an order creates): its table. The path
+    /// is filled by [`AuthorizedPayload::bind`] after the earlier writes of the invocation.
+    deferred_table: Option<String>,
 }
 
 impl Target {
@@ -141,6 +144,18 @@ impl Target {
         Ok(Self {
             method: Method::Patch,
             path,
+            deferred_table: None,
+        })
+    }
+
+    /// `PATCH /api/now/table/<table>/<sys_id of a record created earlier in this invocation>`
+    /// (CAT-3). Authorized with everything else, bound to one sys_id before it is sent.
+    pub fn deferred_patch(table: &str) -> Result<Self, SncfrError> {
+        crate::untrusted::check_api_path(&format!("/api/now/table/{table}"))?;
+        Ok(Self {
+            method: Method::Patch,
+            path: String::new(),
+            deferred_table: Some(table.to_string()),
         })
     }
 
@@ -151,6 +166,7 @@ impl Target {
         Ok(Self {
             method: Method::Post,
             path,
+            deferred_table: None,
         })
     }
 
@@ -168,6 +184,7 @@ impl Target {
         Ok(Self {
             method: Method::Post,
             path: format!("/api/sn_sc/servicecatalog/items/{item_sys_id}/order_now"),
+            deferred_table: None,
         })
     }
 }
@@ -246,6 +263,7 @@ impl VerifiedMutation {
             target: Target {
                 method: Method::Post,
                 path: "/api/now/attachment/file".to_string(),
+                deferred_table: None,
             },
             body: Body::File {
                 query: vec![
@@ -292,6 +310,31 @@ pub struct AuthorizedPayload {
     body: Body,
 }
 
+impl AuthorizedPayload {
+    /// Whether this payload still needs [`Self::bind`] before it can be sent.
+    pub fn is_deferred(&self) -> bool {
+        self.target.deferred_table.is_some() && self.target.path.is_empty()
+    }
+
+    /// Binds a deferred target to the one record it may write (a 32-hex sys_id).
+    pub fn bind(mut self, sys_id: &str) -> Result<Self, SncfrError> {
+        let Some(table) = self.target.deferred_table.clone() else {
+            return Err(SncfrError::InvalidArgs {
+                message: "internal error: only a deferred target can be bound".to_string(),
+                remediation: None,
+            });
+        };
+        if !crate::untrusted::is_sys_id(sys_id) {
+            return Err(SncfrError::InvalidArgs {
+                message: "internal error: a deferred target needs a sys_id".to_string(),
+                remediation: None,
+            });
+        }
+        self.target = Target::patch_record(&table, sys_id)?;
+        Ok(self)
+    }
+}
+
 /// What a write returned, after the post-write check.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WriteOutcome {
@@ -329,6 +372,13 @@ impl MutatingClient {
 
     /// Sends one authorized mutation and compares a record write's response with what was sent.
     pub async fn send(&self, payload: AuthorizedPayload) -> Result<WriteOutcome, SncfrError> {
+        if payload.is_deferred() {
+            return Err(SncfrError::InvalidArgs {
+                message: "internal error: a deferred write was sent before it was bound"
+                    .to_string(),
+                remediation: None,
+            });
+        }
         let AuthorizedPayload { target, body } = payload;
         let display = [("sysparm_display_value", "all")];
         match body {
