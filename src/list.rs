@@ -14,17 +14,6 @@ use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED}
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-const DEFAULT_TICKET_COLUMNS: &[&str] = &[
-    "number",
-    "sys_class_name",
-    "state",
-    "priority",
-    "short_description",
-    "assigned_to",
-    "assignment_group",
-    "sys_updated_on",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordListEnvelope {
     pub count: usize,
@@ -150,10 +139,7 @@ async fn execute_filtered_query(
     {
         view.fields.clone()
     } else if is_ticket_default {
-        DEFAULT_TICKET_COLUMNS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect()
+        crate::pack::active().core.list_columns.clone()
     } else {
         Vec::new()
     };
@@ -426,6 +412,7 @@ mod tests {
                 username: None,
                 read_only: false,
                 views,
+                ..Default::default()
             },
         );
 

@@ -61,6 +61,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "SNCFR_LOG_FILE")]
     pub log_file: Option<PathBuf>,
 
+    /// Instance Pack layered over the profile's `pack =` for this invocation (ADR-0004)
+    #[arg(long, global = true, env = "SNCFR_PACK")]
+    pub pack: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -137,6 +141,25 @@ pub enum Commands {
 
     /// Run connectivity, TLS, Corporate SSO session, and non-admin ACL capability diagnostics
     Doctor,
+
+    /// Validate or inspect Instance Packs (ADR-0004)
+    #[command(subcommand)]
+    Pack(PackCommands),
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum PackCommands {
+    /// Check a pack file: schema, types, references between sections, duplicate prefixes/aliases
+    Validate {
+        /// Path to the pack TOML file
+        path: PathBuf,
+    },
+    /// Print the merged pack (ootb + profile pack + `--pack`) with per-entry origins and its hash
+    Show {
+        /// Emit the merged pack as re-loadable TOML instead of the summary
+        #[arg(long)]
+        toml: bool,
+    },
 }
 
 impl Commands {
@@ -151,6 +174,7 @@ impl Commands {
             | Self::Create(_)
             | Self::Attach(_)
             | Self::Skill(_)
+            | Self::Pack(_)
             | Self::Doctor => CommandOutputShape::Dossier,
             Self::List(_)
             | Self::Search(_)

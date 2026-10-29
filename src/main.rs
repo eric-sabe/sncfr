@@ -7,7 +7,8 @@ use sncfr::auth::{
 };
 use sncfr::cache::InstanceCache;
 use sncfr::cli::{
-    ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands, SkillCommands,
+    ApprovalCommands, AuthCommands, AuthLoginArgs, CatalogCommands, Cli, Commands, PackCommands,
+    SkillCommands,
 };
 use sncfr::client::{ReadOnlyClient, WritePermit};
 use sncfr::config::{AppConfig, ResolvedProfile};
@@ -95,6 +96,35 @@ async fn main() -> ExitCode {
         );
     }
 
+    // Load and install the Instance Pack before anything can select a credential store (NA-5).
+    // `pack validate` checks an arbitrary file, so it must still run when the configured pack fails.
+    let validating_pack = matches!(&cli.command, Commands::Pack(PackCommands::Validate { .. }));
+    match load_instance_pack(&cli, resolved_profile.as_ref()) {
+        Ok(pack) => {
+            sncfr::debug_log!(
+                "pack",
+                "Loaded Instance Pack '{}' {} ({} layer(s))",
+                pack.name,
+                pack.short_hash(),
+                pack.layers.len()
+            );
+            if !sncfr::pack::install(pack) {
+                let err = SncfrError::InvalidArgs {
+                    message: "internal error: the Instance Pack was read before it was installed"
+                        .to_string(),
+                    remediation: None,
+                };
+                eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                return err.exit_code();
+            }
+        }
+        Err(_) if validating_pack => {}
+        Err(err) => {
+            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+            return err.exit_code();
+        }
+    }
+
     let (resolved_output, write_permit) =
         match validate_invocation(&cli, resolved_profile.as_ref(), is_stdout_tty) {
             Ok(res) => res,
@@ -116,7 +146,13 @@ async fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Commands::Auth(AuthCommands::Login(args)) => {
-            let store = CredentialStore::default_store();
+            let store = match CredentialStore::default_store() {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
             match execute_auth_login(&cli, &mut config, args, &store).await {
                 Ok(summary) => {
                     render_auth_login(&summary, resolved_output);
@@ -129,7 +165,13 @@ async fn main() -> ExitCode {
             }
         }
         Commands::Auth(AuthCommands::Import(args)) => {
-            let store = CredentialStore::default_store();
+            let store = match CredentialStore::default_store() {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
             match execute_auth_import(&cli, &mut config, args, &store).await {
                 Ok(summary) => {
                     render_auth_import(&summary, resolved_output);
@@ -149,7 +191,13 @@ async fn main() -> ExitCode {
                     return err.exit_code();
                 }
             };
-            let store = CredentialStore::default_store();
+            let store = match CredentialStore::default_store() {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    return err.exit_code();
+                }
+            };
             match execute_auth_logout(&profile, &store) {
                 Ok(summary) => {
                     render_auth_logout(&summary, resolved_output);
@@ -160,6 +208,37 @@ async fn main() -> ExitCode {
                     return err.exit_code();
                 }
             }
+        }
+        Commands::Pack(PackCommands::Validate { path }) => {
+            return match sncfr::pack::report::execute_pack_validate(path) {
+                Ok(v) => {
+                    println!(
+                        "{}",
+                        sncfr::pack::report::format_pack_validation(&v, resolved_output)
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    err.exit_code()
+                }
+            };
+        }
+        Commands::Pack(PackCommands::Show { toml }) => {
+            return match sncfr::pack::report::format_pack_show(
+                sncfr::pack::active(),
+                *toml,
+                resolved_output,
+            ) {
+                Ok(out) => {
+                    println!("{out}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+                    err.exit_code()
+                }
+            };
         }
         Commands::Skill(subcmd) => match subcmd {
             SkillCommands::Print => {
@@ -198,12 +277,12 @@ async fn main() -> ExitCode {
     if matches!(result, Err(SncfrError::AuthExpired { .. }))
         && let Ok(profile) = config.resolve_profile(&cli)
         && can_auto_reauth(&cli, &profile, is_stdin_tty, is_stdout_tty)
+        && let Ok(store) = CredentialStore::default_store()
     {
         eprintln!(
             "ServiceNow session expired for '{}'; launching isolated SSO browser window...",
             profile.instance_url
         );
-        let store = CredentialStore::default_store();
         let login_args = AuthLoginArgs {
             browser: None,
             timeout_secs: 180,
@@ -237,6 +316,28 @@ async fn main() -> ExitCode {
             err.exit_code()
         }
     }
+}
+
+/// Loads `ootb` ⊕ the profile's `pack =` ⊕ `--pack`/`SNCFR_PACK` (ADR-0004).
+fn load_instance_pack(
+    cli: &Cli,
+    profile: Option<&ResolvedProfile>,
+) -> Result<sncfr::pack::MergedPack, SncfrError> {
+    if cli.pack.is_some() && profile.is_some_and(|p| p.pack_locked) {
+        return Err(SncfrError::InvalidArgs {
+            message: format!(
+                "Profile '{}' has `pack_locked = true`; `--pack` / `SNCFR_PACK` overrides are not allowed",
+                profile.map_or("", |p| p.name.as_str())
+            ),
+            remediation: Some(
+                "Drop `--pack` / unset SNCFR_PACK, or change `pack =` in config.toml.".to_string(),
+            ),
+        });
+    }
+    sncfr::pack::load_layers(
+        profile.and_then(|p| p.pack_path.as_deref()),
+        cli.pack.as_deref(),
+    )
 }
 
 async fn execute_authenticated_command(
@@ -349,7 +450,7 @@ async fn execute_authenticated_command(
                 Ok(format_mutation_report(&report, resolved_output))
             }
         },
-        Commands::Auth(_) | Commands::Skill(_) => unreachable!(),
+        Commands::Auth(_) | Commands::Skill(_) | Commands::Pack(_) => unreachable!(),
     }
 }
 
@@ -360,7 +461,7 @@ async fn prepare_read_context(
     is_stdout_tty: bool,
 ) -> Result<(ResolvedProfile, InstanceCache, ReadOnlyClient), SncfrError> {
     let profile = config.resolve_profile(cli)?;
-    let store = CredentialStore::default_store();
+    let store = CredentialStore::default_store()?;
     let cache = InstanceCache::for_instance(&profile.instance_key)?;
     let client =
         resolve_authenticated_client(cli, config, &profile, &store, is_stdin_tty, is_stdout_tty)
@@ -389,6 +490,7 @@ fn render_auth_status(summary: &AuthStatusSummary, format: ResolvedOutputFormat)
                 .collect();
             println!("Profile:    {} ({})", summary.profile, summary.instance_url);
             println!("Auth:       {} (AUTHENTICATED)", summary.auth_method);
+            println!("Pack:       {}", summary.pack.headline());
             println!(
                 "User (@me): {} ({}) [sys_id: {}]",
                 summary.identity.display_name, summary.identity.user_name, summary.identity.sys_id

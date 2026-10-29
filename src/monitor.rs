@@ -191,7 +191,7 @@ pub async fn execute_feed(
 
     let limit_str = args.filters.limit.to_string();
     let offset_str = args.filters.offset.to_string();
-    let fields = "sys_id,number,sys_class_name,state,priority,short_description,assigned_to,sys_updated_on,sys_updated_by,comments_and_work_notes,comments";
+    let fields = crate::pack::active().core.feed_fields.join(",");
 
     let path = format!("/api/now/table/{table}");
     let resp: Value = client
@@ -202,7 +202,7 @@ pub async fn execute_feed(
                 ("sysparm_limit", limit_str.as_str()),
                 ("sysparm_offset", offset_str.as_str()),
                 ("sysparm_display_value", "all"),
-                ("sysparm_fields", fields),
+                ("sysparm_fields", fields.as_str()),
             ],
         )
         .await?;
@@ -730,6 +730,7 @@ mod tests {
                 username: None,
                 read_only: false,
                 views: BTreeMap::new(),
+                ..Default::default()
             },
         );
         let cli = crate::cli::Cli::try_parse_from(["sncfr", "stats", "--table", "inc"])

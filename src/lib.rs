@@ -11,6 +11,7 @@ pub mod log;
 pub mod monitor;
 pub mod mutate;
 pub mod output;
+pub mod pack;
 pub mod query;
 pub mod resolve;
 pub mod schema;
@@ -74,6 +75,7 @@ mod tests {
                 username: None,
                 read_only: true,
                 views: BTreeMap::new(),
+                ..Default::default()
             },
         );
 

@@ -45,7 +45,7 @@ ServiceNow's official CLI offerings fail the everyday user and AI agent use case
      - Extracts all domain cookies via CDP `Network.getCookies` and `window.g_ck` via `Runtime.evaluate`, closes the window automatically, and stores the encrypted session bundle in the OS Keychain (`keyring`).
 2. **Headless / Manual Session Import (`sncfr auth import`)**:
    - Accepts a "Copy as cURL" command from browser DevTools, raw `Cookie` + `X-UserToken` values via stdin or `--file`, explicit `--cookie` / `--user-token` flags, or environment variables (`SNCFR_COOKIE`, `SNCFR_USER_TOKEN`) for remote/SSH/container environments. If only a session `Cookie` is provided, `sncfr auth import` automatically attempts to fetch `window.g_ck` (`X-UserToken`) from `/now/nav/ui/home` or `/navpage.do`.
-   - In headless/container environments without an OS Keychain daemon, setting `SNCFR_CREDENTIALS_FILE=/path/to/creds.json` stores credentials in a `0600`-permissioned file store.
+   - In headless/container environments without an OS Keychain daemon, setting `SNCFR_CREDENTIALS_FILE=/path/to/creds.json` stores credentials in a `0600`-permissioned file store. An Instance Pack with `[auth] allow_credentials_file = false` makes every command exit `2` before that file is opened (ADR-0001 amendment, §7.3).
 3. **Token / Basic / OAuth Fallback (`api-key`, `basic`, `oauth`)**:
    - Supports `x-sn-apikey` header tokens (`SNCFR_API_KEY`), Basic Auth (`SNCFR_USERNAME` + `SNCFR_PASSWORD`), or OAuth 2.0 Bearer tokens (`SNCFR_BEARER_TOKEN`) when available (e.g., on Personal Developer Instances or service accounts).
 
@@ -98,6 +98,7 @@ All subcommands accept the following global flags:
 - `--read-only` (env `SNCFR_READ_ONLY`): Enforce hard read-only lock for the invocation (rejects `--write` with exit code `6`).
 - `--verbose` (`-v`, env `SNCFR_VERBOSE`): Enable verbose timestamped diagnostic logging to `stderr` (covering profile resolution, browser discovery, CDP session probing, Keychain storage, and HTTP request/response status).
 - `--log-file <path>` (env `SNCFR_LOG_FILE`): Append structured timestamped debug logs to `<path>`.
+- `--pack <path>` (env `SNCFR_PACK`): Instance Pack layered over the profile's `pack =` for this invocation (§7.3). Rejected (exit `2`) on a profile with `pack_locked = true`.
 
 ### 5.1 Ticket Prefix Auto-Resolution
 
@@ -162,7 +163,9 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 - **`sncfr schema <table|prefix> [--choices [field]] [--sync]`** — Inspect table fields, mandatory status, and valid `sys_choice` options; manage local metadata cache.
 - **`sncfr table <table_name> [list-flags]`** — Read-only escape hatch for querying arbitrary non-ticket tables (`sys_user`, `sys_user_group`, `cmdb_ci`, `kb_knowledge`, etc.) that the user has ACL permission to read.
 - **`sncfr skill <print|install>`** — Generates or installs an instance-aware `SKILL.md` for AI agents (including the user's configured saved views, discovered custom ticket prefixes, and safety rules).
-- **`sncfr doctor`** — Runs connectivity, TLS, authentication, and ACL capability diagnostics.
+- **`sncfr doctor`** — Runs connectivity, TLS, authentication, and ACL capability diagnostics, and reports the merged Instance Pack (name, version, status, hash, active workarounds). `sncfr auth status` also reports the pack.
+- **`sncfr pack validate <path>`** — Strictly parses and semantically validates one pack file (§7.3). It reports every problem as `<file>:<line>:<col>: <key>: <message>` and exits `2` (`PACK_INVALID`) on errors; warnings (draft status, complete-choice-set notices) still exit `0`. It runs without authentication, even when the profile's own pack is broken.
+- **`sncfr pack show [--toml]`** — Prints the merged pack (`ootb` ⊕ profile pack ⊕ `--pack`): a summary with per-entry origin (`ootb`/`profile`/`override`), safety keys, and hash; `--json`/`-o yaml` for the full structure; `--toml` for a re-loadable single pack file.
 
 ---
 
@@ -203,6 +206,8 @@ default_profile = "prod"
 instance = "https://mycompany.service-now.com"
 auth_method = "sso"
 read_only = false # Set to true to hard-block --write on this profile
+pack = "packs/mycompany.pack.toml" # Optional Instance Pack (§7.3); relative to this file's directory
+pack_locked = false # Set to true to reject --pack / SNCFR_PACK overrides
 
 [profiles.prod.views]
 my-active = { table = "task", query = "assigned_toDYNAMIC90d1921e5f510100a9ad2572f2b477fe^active=true" }
@@ -213,6 +218,16 @@ watched = { table = "task", query = "watch_listLIKEjavascript:gs.getUserID()^act
 ### 7.2 Local Metadata Cache (`~/.cache/sncfr/<instance>/` or `SNCFR_CACHE_DIR`)
 
 - `identity.json`: Cached `@me` user `sys_id`, `user_name`, display name, and group `sys_id`/name list (TTL: 24h).
-- `prefixes.json`: Cached `sys_number` prefix $\to$ table name mapping (TTL: 7d), merged on read with the 12 built-in defaults (`INC` $\to$ `incident`, `CHG` $\to$ `change_request`, `RITM` $\to$ `sc_req_item`, `REQ` $\to$ `sc_request`, `SCTASK` $\to$ `sc_task`, `TASK` $\to$ `task`, `PRB` $\to$ `problem`, `PTASK` $\to$ `problem_task`, `CTASK` $\to$ `change_task`, `CS` $\to$ `sn_customerservice_case`, `KB` $\to$ `kb_knowledge`, `HR` $\to$ `sn_hr_core_case`). Prefixes learned from the `task` fallback (§5.1 step 3) are added to the same file.
+- `prefixes.json`: Cached `sys_number` prefix $\to$ table name mapping (TTL: 7d), merged on read with the prefixes of the merged Instance Pack (the bundled `ootb` pack, `src/pack/ootb.pack.toml`, ships 12 defaults (`INC` $\to$ `incident`, `CHG` $\to$ `change_request`, `RITM` $\to$ `sc_req_item`, `REQ` $\to$ `sc_request`, `SCTASK` $\to$ `sc_task`, `TASK` $\to$ `task`, `PRB` $\to$ `problem`, `PTASK` $\to$ `problem_task`, `CTASK` $\to$ `change_task`, `CS` $\to$ `sn_customerservice_case`, `KB` $\to$ `kb_knowledge`, `HR` $\to$ `sn_hr_core_case`). Prefixes learned from the `task` fallback (§5.1 step 3) are added to the same file.
 - `schemas/<table>.json`: Cached field labels, custom field metadata (`u_*`, `x_*`), and `sys_choice` valid values per table (TTL: 24h).
 - **On-disk format**: every cache file is a JSON envelope `{ "fetched_at": <RFC 3339>, "ttl_seconds": <n>, "data": <payload> }`, written atomically (temp file + rename). A corrupt or unreadable file is treated as a cache miss.
+
+### 7.3 Instance Packs (ADR-0004)
+
+An Instance Pack is a TOML file of per-instance facts. Full schema and semantics: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md) §Pack schema.
+
+- **Layers**: the bundled `ootb` pack (`src/pack/ootb.pack.toml`, the only pack in the binary and the single source of built-in defaults) ⊕ the profile's `pack =` ⊕ `--pack` / `SNCFR_PACK`. Facts replace by key, a user choice set replaces the `ootb` set whole, and `[remove]` deletes keys after its layer is merged.
+- **Safety keys merge as a strictest union**: `allow_credentials_file = false` wins, the first `agent_write_marker` sticks, the lowest `max_requests_per_minute` wins, and `instances` is the intersection. No pack key can clear `read_only`, and user packs cannot set `core.known_free_text`.
+- **Strict parsing**: unknown keys at any depth, a wrong type, or an unsupported `schema_version` major fail with `PACK_INVALID` (exit `2`), reported as `<file>:<line>:<col>: <message>`.
+- **Load order**: the pack loads before the credential store is chosen on every command.
+- **Identity**: the merged pack has a SHA-256 hash (`sha256:<12 hex>` in human output).
