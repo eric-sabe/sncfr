@@ -138,6 +138,7 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 | `show` / `list` default fields | task core fields everywhere; empty custom fields shown | table-aware: pack `fields.default.<table>`, non-task tables skip task core fields; empty custom fields omitted unless the pack lists them |
 | `show` catalog reference / list-collector variables | raw sys_id | the referenced record's name, or the raw value with `(unresolved reference to <table>)` |
 | `show -o md` description, close notes, journal | rendered as Markdown | fenced as plain text; control characters removed |
+| `approvals list` | approvals where `approver = @me` | also approvals routed to your groups (`group.assignment_group`), each once, with `linked_by: user/group/both`. `--state` filters both queries, and `--all-users` drops both linkage filters |
 | `--priority low` where `sys_choice` is unreadable but stats show the values in use | `UNVERIFIABLE (no_metadata)` | verified against the in-use set, or `UNVERIFIABLE (not_seen` / `ootb_unconfirmed)` with the in-use values listed |
 
 ---
