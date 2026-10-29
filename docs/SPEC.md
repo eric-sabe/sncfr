@@ -1,6 +1,6 @@
 # `sncfr` Technical & Product Specification
 
-- **Status**: Living Specification (v0.2.0-dev; last release v0.1.6)
+- **Status**: Living Specification (v0.2.0)
 - **Last Updated**: 2026-10-22
 - **Target Persona**: Non-admin ServiceNow users (both ticket-monitors/explorers and ITIL fulfillers/handlers) and AI coding/operations agents acting on their behalf.
 

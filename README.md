@@ -48,10 +48,10 @@ cargo install --git https://github.com/eric-sabe/sncfr.git
 ```
 
 > [!IMPORTANT]
-> `main` is currently **0.2.0-dev** (brownfield instance support, in progress; see [`docs/specs/brownfield-instance-support.md`](docs/specs/brownfield-instance-support.md)). For the latest stable release, pin the tag:
+> **0.2.0** adds brownfield instance support: Instance Packs, fail-closed value checks (exit `8`), post-write checks (exit `9`), capability-aware fallbacks, `discover`, `triage`, `cmdb lookup`, and recipes. Read [Behavior changes from 0.1.x](#behavior-changes-from-01x) before upgrading. To pin a release:
 >
 > ```bash
-> cargo install --git https://github.com/eric-sabe/sncfr.git --tag v0.1.6
+> cargo install --git https://github.com/eric-sabe/sncfr.git --tag v0.2.0
 > ```
 
 Cargo will download the source, compile an optimized release binary, and install it to `~/.cargo/bin/sncfr`. Verify it works:
@@ -112,7 +112,7 @@ See [`docs/TESTING.md`](docs/TESTING.md) for a step-by-step functional test plan
 
 ## Behavior changes from 0.1.x
 
-Changes in 0.2.0 that existing users and agents will notice are listed here as they land on `main`.
+Changes in 0.2.0 that existing users and agents will notice. Design and rationale: [`docs/specs/brownfield-instance-support.md`](docs/specs/brownfield-instance-support.md).
 
 | Situation | 0.1.x | 0.2.0 |
 |---|---|---|

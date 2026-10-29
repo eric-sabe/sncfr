@@ -85,11 +85,11 @@
 
 ---
 
-## Release 0.2.0: Brownfield Instance Support (Planned — Milestones 6–10)
+## Release 0.2.0: Brownfield Instance Support (Milestones 6–10, in review)
 
 - **Design spec (Tier L)**: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md). It holds the normative requirement IDs, the contracts, the `NA-*` security invariants, the `CT-*` test table, and the full phase/issue breakdown.
-- **Delivery**: one phase = one PR to `main`, and one issue = one commit. `main` carries `0.2.0-dev` until P10 tags `v0.2.0`.
-- **Progress**: H ✅ (0.1.6, tags `v0.1.5`/`v0.1.6`) · P0 in review (#70) · P1 in review (#71) · P2 in review (#72) · P2.5 in review (#73) · P3 in review (#74) · P4 in review (#75) · P5 in review (#76) · P6 in review (#77) · P7 in review (#78) · P8 in review (#79) · P9 in review (#80) · P9.5 in review
+- **Delivery**: one phase = one PR, stacked in phase order (each PR's base is the previous phase), and one issue = one commit. `main` carried `0.2.0-dev` until P10 set `0.2.0`. Tag `v0.2.0` and the GitHub release follow the merge of the stack.
+- **Progress**: H ✅ (0.1.6, tags `v0.1.5`/`v0.1.6`) · P0 in review (#70) · P1 in review (#71) · P2 in review (#72) · P2.5 in review (#73) · P3 in review (#74) · P4 in review (#75) · P5 in review (#76) · P6 in review (#77) · P7 in review (#78) · P8 in review (#79) · P9 in review (#80) · P9.5 in review (#81) · P10 in review (tag `v0.2.0` and release after merge)
 
 | Milestone | Phases | Requirements |
 |---|---|---|
