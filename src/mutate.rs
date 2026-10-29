@@ -109,6 +109,31 @@ pub struct MutationReport {
     /// Merged Instance Pack headline (`<name> <version> · <status> · sha256:…`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack: Option<String>,
+    /// The post-order fill (CAT-3): a second diff block for the RITM the order creates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_ritm: Option<FollowUpBlock>,
+    /// Requested items created by a catalog order (CAT-2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<OrderedItem>,
+    /// Non-fatal notes (e.g. RITM polling timed out); the command still succeeded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Writes to a record that a write earlier in the same invocation creates (CAT-3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUpBlock {
+    /// `<RITM created by this order>` until bound, then the RITM number.
+    pub target: String,
+    pub diffs: Vec<FieldDiff>,
+}
+
+/// One `sc_req_item` created by a catalog order (CAT-2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedItem {
+    pub sys_id: String,
+    pub number: String,
+    pub cat_item: String,
 }
 
 /// What the write gate did for one invocation.
@@ -119,15 +144,34 @@ pub(crate) struct GateRun {
     pub blocking: Vec<UnverifiableField>,
     pub allowed: Vec<String>,
     pub unused: Vec<String>,
+    /// The follow-up stage's result, for committed runs.
+    pub binding: Option<Binding>,
 }
 
 /// Runs prepared mutations through the gate: a dry-run only checks them; `--write` authorizes
 /// all of them before sending the first (NA-2), then sends each.
-pub(crate) async fn run_gate(
+/// What the follow-up stage learned after the first write (CAT-2/3): the record a deferred
+/// write is bound to (none: deferred writes are skipped), plus items and warnings to report.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Binding {
+    pub sys_id: Option<String>,
+    pub items: Vec<OrderedItem>,
+    pub warnings: Vec<String>,
+}
+
+/// Checks every mutation of the invocation, deferred ones included, before anything is sent
+/// (NA-2). Then sends the immediate ones, asks `bind` (given the first write's outcome) which
+/// record the deferred ones target, and sends those bound to it.
+pub(crate) async fn run_gate_staged<F, Fut>(
     client: ReadOnlyClient,
     permit: Option<WritePermit>,
     mutations: Vec<VerifiedMutation>,
-) -> Result<GateRun, SncfrError> {
+    bind: F,
+) -> Result<GateRun, SncfrError>
+where
+    F: FnOnce(Option<&WriteOutcome>) -> Fut,
+    Fut: std::future::Future<Output = Binding>,
+{
     let allow = crate::client::write_gate::allow_list();
     let all: Vec<UnverifiableField> = mutations
         .iter()
@@ -152,6 +196,7 @@ pub(crate) async fn run_gate(
             blocking,
             allowed,
             unused,
+            binding: None,
         });
     };
     if !blocking.is_empty() {
@@ -161,13 +206,21 @@ pub(crate) async fn run_gate(
             blocking,
             allowed,
             unused,
+            binding: None,
         });
     }
     let mutating = client.into_mutating(permit);
     let payloads = mutating.authorize(mutations, allow)?;
-    let mut outcomes = Vec::with_capacity(payloads.len());
-    for p in payloads {
+    let (now, later): (Vec<_>, Vec<_>) = payloads.into_iter().partition(|p| !p.is_deferred());
+    let mut outcomes = Vec::with_capacity(now.len() + later.len());
+    for p in now {
         outcomes.push(mutating.send(p).await?);
+    }
+    let binding = bind(outcomes.first()).await;
+    if let Some(sys_id) = &binding.sys_id {
+        for p in later {
+            outcomes.push(mutating.send(p.bind(sys_id)?).await?);
+        }
     }
     Ok(GateRun {
         mode: "committed",
@@ -175,13 +228,27 @@ pub(crate) async fn run_gate(
         blocking,
         allowed,
         unused,
+        binding: Some(binding),
     })
+}
+
+/// [`run_gate_staged`] for invocations without deferred writes.
+pub(crate) async fn run_gate(
+    client: ReadOnlyClient,
+    permit: Option<WritePermit>,
+    mutations: Vec<VerifiedMutation>,
+) -> Result<GateRun, SncfrError> {
+    run_gate_staged(client, permit, mutations, |_| async { Binding::default() }).await
 }
 
 impl GateRun {
     /// Fills the gate results into `report` and marks allowed rows in its diffs.
     pub(crate) fn fill(&self, report: &mut MutationReport) {
         report.mode = self.mode.to_string();
+        if let Some(b) = &self.binding {
+            report.items.extend(b.items.iter().cloned());
+            report.warnings.extend(b.warnings.iter().cloned());
+        }
         report.unverifiable_fields.clone_from(&self.blocking);
         report.allowed_unverified.clone_from(&self.allowed);
         report.allowed_unverified_unused.clone_from(&self.unused);
@@ -1163,6 +1230,34 @@ fn gate_notes(report: &MutationReport, terminal: bool) -> String {
     let mut out = String::new();
     if let Some(pack) = &report.pack {
         out.push_str(&format!("\nPack: {}\n", clean(pack)));
+    }
+    if let Some(block) = &report.fill_ritm {
+        out.push_str(&format!(
+            "\nThen on {} (--fill-ritm, checked with the order):\n",
+            clean(&block.target)
+        ));
+        for d in &block.diffs {
+            out.push_str(&format!(
+                "  {} → {} [{} · {}]\n",
+                clean(&d.field),
+                clean(&d.after_display),
+                d.source.as_deref().unwrap_or("none"),
+                d.status.as_deref().unwrap_or("")
+            ));
+        }
+    }
+    if !report.items.is_empty() {
+        out.push_str("\nRequested items:\n");
+        for i in &report.items {
+            out.push_str(&format!(
+                "  {} (sys_id {})\n",
+                clean(&i.number),
+                clean(&i.sys_id)
+            ));
+        }
+    }
+    for w in &report.warnings {
+        out.push_str(&format!("\n⚠ {}\n", clean(w)));
     }
     if !report.unverifiable_fields.is_empty() {
         out.push_str(&format!(

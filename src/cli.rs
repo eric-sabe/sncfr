@@ -721,6 +721,16 @@ pub struct CatalogOrderArgs {
     /// Execute the catalog order in ServiceNow (without this flag, runs a Validated Dry-Run Preview)
     #[arg(short, long)]
     pub write: bool,
+
+    /// After `--write`, wait at most this long for the requested items to appear (default: pack
+    /// `catalog.poll.max_wait_secs`, else 20)
+    #[arg(long, value_name = "SECS")]
+    pub poll_timeout: Option<u64>,
+
+    /// After the order, also set the pack's `catalog.post_order_fill.fields` on the requested
+    /// item it creates (checked before the order is sent; off by default)
+    #[arg(long)]
+    pub fill_ritm: bool,
 }
 
 #[derive(Debug, Clone, Args)]

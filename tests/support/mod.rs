@@ -107,6 +107,13 @@ pub enum Scenario {
     /// `sysapproval_approver` answers the `approver=<me>` query with two rows and the
     /// `group.assignment_groupIN…` query with two rows, one of them shared (`approvals.json`).
     LinkedApprovals,
+    /// `/api/sn_sc/*` answers 401 (the role lacks the catalog API) while the Table API answers:
+    /// `sc_cat_item`, `item_option_new`, and `question_choice` from `catalog.json`.
+    CatalogUnauthorized,
+    /// `sn_sc` answers the catalog item (`catalog.json` item, variable `cost_center`) and
+    /// `order_now` (REQ0000001); `sc_req_item?request=…` lists one RITM for the item and one for
+    /// another item; `PATCH sc_req_item/<the item's RITM>` succeeds.
+    CatalogOrderable,
     /// `task` answers with recent rows (`number`, `sys_class_name`): three `ABC-` rows on
     /// `u_abc_request`, two `INC` rows (`task_sample.json`).
     TaskSample,
@@ -347,6 +354,71 @@ impl ExampleCorp {
                 Mock::given(method("GET"))
                     .and(path("/api/now/table/sysapproval_approver"))
                     .respond_with(LinkedApprovals(fixture("approvals.json")))
+                    .mount(&self.server)
+                    .await;
+            }
+            Scenario::CatalogUnauthorized => {
+                let cat = fixture("catalog.json");
+                Mock::given(wiremock::matchers::path_regex("^/api/sn_sc/"))
+                    .respond_with(
+                        ResponseTemplate::new(401).set_body_json(
+                            json!({ "error": { "message": "User Not Authenticated" } }),
+                        ),
+                    )
+                    .mount(&self.server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path(
+                        "/api/now/table/sc_cat_item/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                    ))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(json!({ "result": cat["item"] })),
+                    )
+                    .mount(&self.server)
+                    .await;
+                self.get("sc_cat_item", json!({ "result": [cat["item"]] }))
+                    .await;
+                self.get("item_option_new", json!({ "result": cat["variables"] }))
+                    .await;
+                self.get("question_choice", json!({ "result": cat["choices"] }))
+                    .await;
+            }
+            Scenario::CatalogOrderable => {
+                let item = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+                Mock::given(method("GET"))
+                    .and(path(format!("/api/sn_sc/servicecatalog/items/{item}")))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {
+                        "sys_id": item, "name": "Example Laptop",
+                        "variables": [ { "name": "cost_center", "label": "Cost center", "type": "string" } ]
+                    }})))
+                    .mount(&self.server)
+                    .await;
+                Mock::given(method("POST"))
+                    .and(path(format!(
+                        "/api/sn_sc/servicecatalog/items/{item}/order_now"
+                    )))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {
+                        "request_number": "REQ0000001",
+                        "request_id": "abababababababababababababababab"
+                    }})))
+                    .mount(&self.server)
+                    .await;
+                self.get(
+                    "sc_req_item",
+                    json!({ "result": [
+                        { "sys_id": { "value": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1" }, "number": { "value": "RITM0050001", "display_value": "RITM0050001" }, "cat_item": { "value": item } },
+                        { "sys_id": { "value": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2" }, "number": { "value": "RITM0050002", "display_value": "RITM0050002" }, "cat_item": { "value": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0" } }
+                    ]}),
+                )
+                .await;
+                Mock::given(method("PATCH"))
+                    .and(path(
+                        "/api/now/table/sc_req_item/e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+                    ))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {
+                        "sys_id": { "value": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1" },
+                        "u_cost_center": { "value": "CC-900", "display_value": "CC-900" }
+                    }})))
                     .mount(&self.server)
                     .await;
             }
