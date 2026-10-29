@@ -65,6 +65,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "SNCFR_PACK")]
     pub pack: Option<PathBuf>,
 
+    /// Per-request timeout in seconds (1-300; default 30, or profile `timeout_secs`)
+    #[arg(long, global = true, env = "SNCFR_TIMEOUT", value_name = "SECS")]
+    pub timeout: Option<u64>,
+
     /// Send these UNVERIFIABLE fields exactly as typed (explicit names only; catalog variables
     /// as `var:<name>`). Only on explicit user instruction (SAFE-4)
     #[arg(long, global = true, value_delimiter = ',', value_name = "FIELD,...")]
@@ -145,11 +149,18 @@ pub enum Commands {
     Skill(SkillCommands),
 
     /// Run connectivity, TLS, Corporate SSO session, and non-admin ACL capability diagnostics
-    Doctor,
+    Doctor(DoctorArgs),
 
     /// Validate or inspect Instance Packs (ADR-0004)
     #[command(subcommand)]
     Pack(PackCommands),
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct DoctorArgs {
+    /// Forget the capability record and re-probe every capability (CAP-2, CAP-6)
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -180,7 +191,7 @@ impl Commands {
             | Self::Attach(_)
             | Self::Skill(_)
             | Self::Pack(_)
-            | Self::Doctor => CommandOutputShape::Dossier,
+            | Self::Doctor(_) => CommandOutputShape::Dossier,
             Self::List(_)
             | Self::Search(_)
             | Self::Stats(_)

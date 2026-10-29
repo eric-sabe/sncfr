@@ -12,7 +12,7 @@ use sncfr::cli::{
 };
 use sncfr::client::{ReadOnlyClient, WritePermit};
 use sncfr::config::{AppConfig, ResolvedProfile};
-use sncfr::doctor::{execute_doctor, format_doctor_report};
+use sncfr::doctor::format_doctor_report;
 use sncfr::dossier::{assemble_ticket_dossier, format_ticket_dossiers};
 use sncfr::error::SncfrError;
 use sncfr::list::{execute_list, execute_search, execute_table, format_record_list};
@@ -119,6 +119,22 @@ async fn main() -> ExitCode {
             }
         }
         Err(_) if validating_pack => {}
+        Err(err) => {
+            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+            return err.exit_code();
+        }
+    }
+
+    match sncfr::policy::resolve_timeout(
+        cli.timeout,
+        resolved_profile.as_ref().and_then(|p| p.timeout_secs),
+    ) {
+        Ok(timeout) => {
+            sncfr::policy::install(sncfr::policy::RequestPolicy::new(
+                timeout,
+                sncfr::pack::active().safety.max_requests_per_minute,
+            ));
+        }
         Err(err) => {
             eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
             return err.exit_code();
@@ -398,8 +414,15 @@ async fn execute_authenticated_command(
             render_auth_status(&summary, resolved_output);
             Ok(String::new())
         }
-        Commands::Doctor => {
-            let report = execute_doctor(&profile, &client, &cache).await?;
+        Commands::Doctor(args) => {
+            let report = sncfr::doctor::execute_doctor_with(
+                &profile,
+                &client,
+                &cache,
+                sncfr::pack::active(),
+                args.refresh,
+            )
+            .await?;
             Ok(format_doctor_report(&report, resolved_output))
         }
         Commands::Show(args) => {
@@ -506,7 +529,8 @@ async fn prepare_read_context(
     let cache = InstanceCache::for_instance(&profile.instance_key)?;
     let client =
         resolve_authenticated_client(cli, config, &profile, &store, is_stdin_tty, is_stdout_tty)
-            .await?;
+            .await?
+            .with_cache(cache.clone());
     Ok((profile, cache, client))
 }
 

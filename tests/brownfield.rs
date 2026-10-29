@@ -357,3 +357,130 @@ async fn read_filters_resolve_per_table_and_flag_what_they_cannot_verify() {
         md.stdout
     );
 }
+
+#[tokio::test]
+async fn a_batch_endpoint_that_does_not_exist_is_remembered_and_skipped() {
+    // CT-20 (CAP-2, BF-TEST-2c)
+    // The example pack seeds batch_api = false (which alone skips batch, checked below); drop
+    // the seed so the observation path is exercised.
+    let seeded = ExampleCorp::start().await;
+    seeded.mount(support::Scenario::BatchUriNotResource).await;
+    assert_eq!(seeded.run(&["--json", "show", "INC0012345"]).code, 0);
+    assert!(
+        seeded
+            .requests()
+            .await
+            .iter()
+            .all(|r| r.url.path() != "/api/now/batch"),
+        "pack seed skips batch"
+    );
+
+    let corp =
+        ExampleCorp::start_with_pack(&support::EXAMPLE_PACK.replace("batch_api = false\n", ""))
+            .await;
+    corp.mount(support::Scenario::BatchUriNotResource).await;
+    let first = corp.run(&["--json", "show", "INC0012345"]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(first.json()["number"], "INC0012345");
+    let caps =
+        std::fs::read_to_string(corp.cache_file("capabilities.json")).expect("capabilities.json");
+    let caps: serde_json::Value = serde_json::from_str(&caps).expect("json");
+    assert_eq!(
+        caps["data"]["observations"]["batch_api"]["state"],
+        "unavailable"
+    );
+    assert_eq!(
+        caps["data"]["observations"]["batch_api"]["hint"],
+        "uri_not_resource"
+    );
+
+    let second = corp.run(&["--json", "show", "INC0012345"]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let batch_posts = corp
+        .requests()
+        .await
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/now/batch")
+        .count();
+    assert_eq!(batch_posts, 1, "the second show skips batch");
+}
+
+#[tokio::test]
+async fn a_slow_section_times_out_alone() {
+    // CT-21 (CAP-3, BF-TEST-2d)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::SlowJournal).await;
+    let out = corp.run(&["--json", "--timeout", "1", "show", "INC0012345"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let d = &out.json();
+    assert_eq!(d["sections"]["journal"]["status"], "timed_out", "{d}");
+    assert!(
+        d["degraded"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x == "journal"))
+    );
+    assert_eq!(d["core_fields"]["number"]["display_value"], "INC0012345");
+
+    let md = corp.run(&["-o", "md", "--timeout", "1", "show", "INC0012345"]);
+    assert!(
+        md.stdout.contains("⚠ Partial dossier:") && md.stdout.contains("journal timed out"),
+        "{}",
+        md.stdout
+    );
+}
+
+#[tokio::test]
+async fn doctor_reports_absent_tables_drift_binding_and_the_capability_record() {
+    // CT-27 (CAP-5), CT-09b doctor half, CAP-6
+    let pack = support::EXAMPLE_PACK
+        .replace(
+            "extra_probe_tables = [\"u_abc_request\"]",
+            "extra_probe_tables = [\"u_abc_request\", \"sn_customerservice_case\"]",
+        )
+        .replace(
+            "{ value = \"4\", label = \"4 - Minor\",",
+            "{ value = \"4\", label = \"4 - Minor Issue\",",
+        );
+    let corp = ExampleCorp::start_with_pack(&pack).await;
+    corp.mount(support::Scenario::ReadableChoices).await;
+    let out = corp.run(&["--json", "doctor", "--refresh"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let r = out.json();
+    let absent = r["capabilities"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|c| c["resource"] == "table:sn_customerservice_case")
+        })
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(absent["note"], "not installed", "{absent}");
+    assert_eq!(r["pack_binds_instance"], true);
+    assert!(
+        r["pack_drift"]
+            .as_array()
+            .is_some_and(
+                |d| d.iter().any(|x| x.as_str().unwrap_or_default().contains(
+                    "value 4 is \"4 - Minor Issue\" in the pack but \"4 - Minor\" on the instance"
+                ))
+            ),
+        "{}",
+        r["pack_drift"]
+    );
+    let record = r["capability_record"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let catalog = record
+        .iter()
+        .find(|c| c["capability"] == "catalog_api")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(catalog["source"], "probe", "{catalog}");
+    assert!(
+        r["pack"]["workarounds"]
+            .as_array()
+            .is_some_and(|w| !w.is_empty())
+    );
+    assert!(corp.mutating_requests().await.is_empty());
+}

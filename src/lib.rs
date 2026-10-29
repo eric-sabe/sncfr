@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache;
+pub mod capabilities;
 pub mod cli;
 pub mod client;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod monitor;
 pub mod mutate;
 pub mod output;
 pub mod pack;
+pub mod policy;
 pub mod query;
 pub mod references;
 pub mod resolve;

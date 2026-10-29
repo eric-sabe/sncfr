@@ -30,6 +30,8 @@ pub enum ErrorCode {
     PackNotForInstance,
     /// Exit code 2: A user/group/approval reference matched more than one record (NA-3).
     AmbiguousReference,
+    /// Exit code 7: A write failed after it may have been sent; its outcome is unknown (NA-7).
+    WriteOutcomeUnknown,
     /// Exit code 8: A value could not be confirmed against a pack or instance metadata; nothing
     /// was written (SAFE-3).
     Unverifiable,
@@ -51,7 +53,7 @@ impl ErrorCode {
             Self::AclForbidden => 4,
             Self::NotFound => 5,
             Self::ReadOnlyLocked => 6,
-            Self::NetworkOrInstanceError => 7,
+            Self::NetworkOrInstanceError | Self::WriteOutcomeUnknown => 7,
             Self::Unverifiable => 8,
             Self::WriteNotApplied => 9,
         }
@@ -72,6 +74,7 @@ impl ErrorCode {
             Self::InvalidQueryValue => "INVALID_QUERY_VALUE",
             Self::PackNotForInstance => "PACK_NOT_FOR_INSTANCE",
             Self::AmbiguousReference => "AMBIGUOUS_REFERENCE",
+            Self::WriteOutcomeUnknown => "WRITE_OUTCOME_UNKNOWN",
             Self::Unverifiable => "UNVERIFIABLE",
             Self::WriteNotApplied => "WRITE_NOT_APPLIED",
         }
@@ -147,6 +150,25 @@ pub enum SncfrError {
         suggestion: Option<String>,
     },
 
+    #[error(
+        "This account is not authorized for the /api/{family}/ API ('{resource}'); the session itself is valid"
+    )]
+    ApiFamilyUnauthorized { family: String, resource: String },
+
+    #[error("Request to '{resource}' timed out after {timeout_secs}s")]
+    TimedOut { resource: String, timeout_secs: u64 },
+
+    #[error("Rate limited (429) on '{resource}'; retry after {retry_after_secs}s")]
+    RateLimited {
+        resource: String,
+        retry_after_secs: u64,
+    },
+
+    #[error(
+        "The write to '{resource}' may or may not have been applied (timeout or connection reset after sending)"
+    )]
+    WriteOutcomeUnknown { resource: String },
+
     #[error("Instance Pack '{pack}' does not list instance '{instance}' (`instances = [...]`)")]
     PackNotForInstance { pack: String, instance: String },
 
@@ -183,6 +205,8 @@ pub struct ErrorDetail {
     pub unverifiable_fields: Vec<crate::client::write_gate::UnverifiableField>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub not_applied: Vec<crate::client::write_gate::NotApplied>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
 }
 
 impl SncfrError {
@@ -203,6 +227,9 @@ impl SncfrError {
             Self::WriteNotApplied { .. } => ErrorCode::WriteNotApplied,
             Self::PackNotForInstance { .. } => ErrorCode::PackNotForInstance,
             Self::AmbiguousReference { .. } => ErrorCode::AmbiguousReference,
+            Self::RateLimited { .. } | Self::TimedOut { .. } => ErrorCode::NetworkOrInstanceError,
+            Self::ApiFamilyUnauthorized { .. } => ErrorCode::AclForbidden,
+            Self::WriteOutcomeUnknown { .. } => ErrorCode::WriteOutcomeUnknown,
         }
     }
 
@@ -239,6 +266,19 @@ impl SncfrError {
             ),
             Self::WriteNotApplied { .. } => Some(
                 "Do not retry. Report the not_applied fields to the user and check the record with `sncfr show`.".to_string(),
+            ),
+            Self::ApiFamilyUnauthorized { family, .. } => Some(format!(
+                "Your role can read tables but not call /api/{family}/. Read-only commands fall back to the Table API where they can; ask your ServiceNow admin for the API role, or use the portal."
+            )),
+            Self::TimedOut { timeout_secs, .. } => Some(format!(
+                "Re-run with a longer timeout, e.g. `--timeout {}`.",
+                (timeout_secs * 2).clamp(2, 300)
+            )),
+            Self::RateLimited { retry_after_secs, .. } => Some(format!(
+                "Wait {retry_after_secs}s, then retry at most once."
+            )),
+            Self::WriteOutcomeUnknown { .. } => Some(
+                "Run `sncfr show <ticket>` to check whether the change landed before any retry. Never re-run a create or catalog order.".to_string(),
             ),
             Self::AmbiguousReference { kind, suggestion, .. } => Some(match suggestion {
                 Some(s) => format!("Suggestion (not applied): {s}. Re-run with the exact {kind} name from the candidates, or its sys_id."),
@@ -278,6 +318,12 @@ impl SncfrError {
                 not_applied: match self {
                     Self::WriteNotApplied { not_applied } => not_applied.clone(),
                     _ => Vec::new(),
+                },
+                retry_after_secs: match self {
+                    Self::RateLimited {
+                        retry_after_secs, ..
+                    } => Some(*retry_after_secs),
+                    _ => None,
                 },
             },
         }

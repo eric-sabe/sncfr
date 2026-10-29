@@ -62,6 +62,23 @@ pub async fn load_or_sync_table_schema(
         .await
     {
         Ok(resp) => {
+            use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
+            let visible = resp
+                .get("result")
+                .and_then(Value::as_array)
+                .is_some_and(|r| !r.is_empty());
+            CapabilityRecord::observe(
+                cache,
+                Capability::DictionaryReadable,
+                if visible {
+                    CapState::Available
+                } else {
+                    CapState::Unavailable
+                },
+                CapSource::Observed,
+                Some(200),
+                (!visible).then_some(CapHint::ZeroRows),
+            );
             if let Some(rows) = resp.get("result").and_then(Value::as_array) {
                 for row in rows {
                     let Some(element) = extract_field_value(row, "element") else {
@@ -102,6 +119,17 @@ pub async fn load_or_sync_table_schema(
         }
         Err(SncfrError::AuthRequired { profile }) => {
             return Err(SncfrError::AuthRequired { profile });
+        }
+        Err(SncfrError::AclForbidden { .. }) => {
+            use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
+            CapabilityRecord::observe(
+                cache,
+                Capability::DictionaryReadable,
+                CapState::Unauthorized,
+                CapSource::Observed,
+                Some(403),
+                Some(CapHint::Acl),
+            );
         }
         Err(_) => {}
     }

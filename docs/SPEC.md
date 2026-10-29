@@ -51,6 +51,7 @@ ServiceNow's official CLI offerings fail the everyday user and AI agent use case
 
 ### 3.2 Session Expiry & Re-Authentication
 
+- **Per-API-family 401s (CAP-4)**: a `401` (or login page) from a non-Table API family (`/api/sn_sc/*`, `/api/sn_chg_rest/*`) triggers one fresh Table API probe (`GET /api/now/table/sys_user?sysparm_limit=1`) sent after that 401. If the probe returns JSON 2xx, the account just isn't authorized for that family: exit `4` `ACL_FORBIDDEN` (`ApiFamilyUnauthorized`), with no re-auth prompt, and `catalog_api = unauthorized` recorded for `sn_sc`. A probe 401, redirect, or HTML login page is a real expiry and handled as below. The probe is never cached, so a session that expires mid-run is never masked.
 - When an API call returns `401 Unauthorized` or an invalid session redirect:
   - **Interactive TTY (`stdin` and `stdout` are TTYs)**: Automatically launches the isolated SSO `--app` window (which often completes hands-free via persisted IdP cookies in the isolated profile) and retries the original command.
   - **Non-Interactive / Agent Mode (`!isatty` or `--no-interactive`)**: Fails fast with exit code `3` (`AUTH_EXPIRED`) and outputs a structured error instructing the caller to run `sncfr auth login`.
@@ -108,6 +109,7 @@ All subcommands accept the following global flags:
 - `--read-only` (env `SNCFR_READ_ONLY`): Enforce hard read-only lock for the invocation (rejects `--write` with exit code `6`).
 - `--verbose` (`-v`, env `SNCFR_VERBOSE`): Enable verbose timestamped diagnostic logging to `stderr` (covering profile resolution, browser discovery, CDP session probing, Keychain storage, and HTTP request/response status).
 - `--log-file <path>` (env `SNCFR_LOG_FILE`): Append structured timestamped debug logs to `<path>`.
+- `--timeout <secs>` (env `SNCFR_TIMEOUT`, profile `timeout_secs`): Per-request timeout, 1–300 s (default 30); out of range is exit `2`.
 - `--allow-unverified <field,...>`: Send the named `UNVERIFIABLE` fields exactly as typed (§4.2, §6.2). Explicit names only (no `*`/`all`; catalog variables as `var:<name>`), never set by env or profile; only on explicit user instruction.
 - `--pack <path>` (env `SNCFR_PACK`): Instance Pack layered over the profile's `pack =` for this invocation (§7.3). Rejected (exit `2`) on a profile with `pack_locked = true`.
 
@@ -121,7 +123,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 ### 5.2 Top-Level Exploration & Monitoring Commands (Read-Only)
 
 - **`sncfr show <TICKET>... [flags]`** (alias: `view`, `get`)
-  - Assembles a complete **Ticket Dossier** via a single `/api/now/batch` request (automatically falling back to concurrent `GET` requests if `/api/now/batch` is ACL-restricted on the instance):
+  - Assembles a complete **Ticket Dossier** from concurrent Table API `GET`s, using a single `/api/now/batch` request as an optimization when the capability record (§7.2) says batch works on this instance. A batch 400 "URI does not represent any resource" or 404 is remembered as `unavailable`, a 403 as `unauthorized`, and later runs skip it. Each section below degrades on its own (`restricted` 403, `unavailable` 404/invalid table, `timed_out`, or `error`): JSON carries `sections.<name>.status` and `degraded[]`, Markdown shows a `⚠ Partial dossier: …` line, and the command still exits 0. Only failing to fetch the ticket itself fails the command:
     1. **Core & Custom Fields**: Curated core fields (`number`, `state`, `priority`, `urgency`, `impact`, `short_description`, `description`, `opened_by`, `caller_id`/`requested_for`, `assignment_group`, `assigned_to`, `sys_created_on`, `sys_updated_on`, `close_code`, `close_notes`, etc.) **plus all non-empty custom fields (`u_*`, `x_*`)** with `sysparm_display_value=all`.
     2. **Catalog Variables (for `sc_req_item` / `sc_task`)**: Queries `sc_item_option_mtom` $\to$ `sc_item_option` to render the question/answer pairs submitted on the Service Catalog form.
     3. **Chronological Activity Stream (`comments` & `work_notes`)**: Queries `sys_journal_field` (`element_id=<sys_id>^ORDERBYsys_created_on`) to render customer-visible comments and internal work notes in chronological order. If `sys_journal_field` returns `403 Forbidden`, gracefully falls back to parsing inline `comments_and_work_notes` / `comments` display values.
@@ -176,7 +178,13 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 - **`sncfr schema <table|prefix> [--choices [field]] [--sync]`** — Inspect table fields, mandatory status, and valid `sys_choice` options; manage local metadata cache.
 - **`sncfr table <table_name> [list-flags]`** — Read-only escape hatch for querying arbitrary non-ticket tables (`sys_user`, `sys_user_group`, `cmdb_ci`, `kb_knowledge`, etc.) that the user has ACL permission to read.
 - **`sncfr skill <print|install>`** — Generates or installs an instance-aware `SKILL.md` for AI agents (including the user's configured saved views, discovered custom ticket prefixes, and safety rules).
-- **`sncfr doctor`** — Runs connectivity, TLS, authentication, and ACL capability diagnostics, and reports the merged Instance Pack (name, version, status, hash, active workarounds). `sncfr auth status` also reports the pack.
+- **`sncfr doctor [--refresh]`** — Runs connectivity, TLS, authentication, and ACL capability diagnostics; probes the pack's `core.probe_tables` plus `doctor.extra_probe_tables`; and reports:
+  - the merged Instance Pack (name, version, status, hash, active workarounds);
+  - whether the pack lists this instance;
+  - **pack drift** (user-pack choice entries that readable `sys_choice` contradicts);
+  - the **capability record** (§7.2).
+
+  Probes are recorded as observations. Tables in `doctor.absent_tables_ok` that return 400/404 are reported as `not installed`, not as problems. `--refresh` forgets the record first and also probes the catalog API. `sncfr auth status` also reports the pack.
 - **`sncfr pack validate <path>`** — Strictly parses and semantically validates one pack file (§7.3). It reports every problem as `<file>:<line>:<col>: <key>: <message>` and exits `2` (`PACK_INVALID`) on errors; warnings (draft status, complete-choice-set notices) still exit `0`. It runs without authentication, even when the profile's own pack is broken.
 - **`sncfr pack show [--toml]`** — Prints the merged pack (`ootb` ⊕ profile pack ⊕ `--pack`): a summary with per-entry origin (`ootb`/`profile`/`override`), safety keys, and hash; `--json`/`-o yaml` for the full structure; `--toml` for a re-loadable single pack file.
 
@@ -204,7 +212,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 | `4` | `ACL_FORBIDDEN` | Authenticated user lacks ServiceNow permissions for the target resource. |
 | `5` | `NOT_FOUND` | Ticket number or record `sys_id` does not exist (or is hidden by query business rules/ACLs). |
 | `6` | `READ_ONLY_LOCKED` | `--write` was attempted while `SNCFR_READ_ONLY=1` or profile `read_only = true` is active. |
-| `7` | `NETWORK_OR_INSTANCE_ERROR` | TLS, timeout, rate-limit (`429`), or instance `5xx` error. |
+| `7` | `NETWORK_OR_INSTANCE_ERROR` | TLS, timeout, rate-limit (`429`), or instance `5xx` error. **Rate limits (SAFE-9)**: on `429`, `Retry-After` (seconds or HTTP-date) is honored, clamped to 60 s per wait and 120 s per request. Reads retry up to 3 times, a PATCH retries once and only on the instance's own JSON 429, and a POST (`create`, catalog order, attachment) is never retried. The envelope then carries `retry_after_secs`. An optional pack `limits.max_requests_per_minute` rate-limits the process. **`WRITE_OUTCOME_UNKNOWN`** (also exit 7): a write timed out or the connection reset after sending, so it may or may not have landed. Run `sncfr show` before any retry, and never re-run a create or order. |
 | `8` | `UNVERIFIABLE` | One or more values could not be confirmed against an active pack or instance metadata (§4.2). **Nothing was written.** The preview still prints to stdout; the error envelope lists `unverifiable_fields[{field, input, would_send, reason, candidates, suggested}]`. Agents: show the user `would_send` and candidates, prefer re-running with a candidate value, and use `--allow-unverified <fields>` only when the user explicitly confirms the literal value. |
 | `9` | `WRITE_NOT_APPLIED` | The instance accepted the write but returned some fields with a different value than sent (unknown field, field-level write ACL, business rule). The record **was** partly updated; `not_applied[{field, sent, returned}]`. Do not retry; report to the user. Fields absent from the response are listed as `unconfirmed` and do not change the exit code. |
 | `2` | `PACK_NOT_FOR_INSTANCE` | `--write` against an instance the merged Instance Pack does not list in `instances` (reads print a warning). |
@@ -236,6 +244,7 @@ watched = { table = "task", query = "watch_listLIKEjavascript:gs.getUserID()^act
 - `identity.json`: Cached `@me` user `sys_id`, `user_name`, display name, and group `sys_id`/name list (TTL: 24h).
 - `prefixes.json`: Cached `sys_number` prefix $\to$ table name mapping (TTL: 7d), merged on read with the prefixes of the merged Instance Pack (the bundled `ootb` pack, `src/pack/ootb.pack.toml`, ships 12 defaults (`INC` $\to$ `incident`, `CHG` $\to$ `change_request`, `RITM` $\to$ `sc_req_item`, `REQ` $\to$ `sc_request`, `SCTASK` $\to$ `sc_task`, `TASK` $\to$ `task`, `PRB` $\to$ `problem`, `PTASK` $\to$ `problem_task`, `CTASK` $\to$ `change_task`, `CS` $\to$ `sn_customerservice_case`, `KB` $\to$ `kb_knowledge`, `HR` $\to$ `sn_hr_core_case`). Prefixes learned from the `task` fallback (§5.1 step 3) are added to the same file.
 - `schemas/<table>.json`: Cached field labels, custom field metadata (`u_*`, `x_*`), and `sys_choice` valid values per table (TTL: 24h).
+- `capabilities.json`: per-instance capability record (CAP-1): `batch_api`, `catalog_api`, `choice_table_filter`, `dictionary_readable`, `number_table_readable`, `stats_group_by`, each `available | unavailable | unauthorized | unknown` with source (`observed`, `probe`, or a pack seed), age, HTTP status, and a closed hint (`invalid_table`, `uri_not_resource`, `acl`, `timeout`, `zero_rows`). It never stores response text. An observation stays authoritative for 7 days, then the pack seed (`true` → available, `false` → unavailable), then `unknown`.
 - **On-disk format**: every cache file is a JSON envelope `{ "fetched_at": <RFC 3339>, "ttl_seconds": <n>, "data": <payload> }`, written atomically (temp file + rename). A corrupt or unreadable file is treated as a cache miss.
 
 ### 7.3 Instance Packs (ADR-0004)
