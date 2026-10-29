@@ -262,8 +262,9 @@ pub struct ListFilterArgs {
     #[arg(long)]
     pub opened_by: Option<String>,
 
-    /// Filter by assignment group (`@my-groups`, group name, or `sys_id`)
-    #[arg(short, long)]
+    /// Filter by assignment group (`@my-groups`, group name, or `sys_id`); names expand through
+    /// the Instance Pack's group suffixes
+    #[arg(short, long, visible_aliases = ["assignment-group"])]
     pub group: Option<String>,
 
     /// Filter by watch list member (`@me`, username, or `sys_id`)
@@ -277,6 +278,14 @@ pub struct ListFilterArgs {
     /// Only include inactive/closed tickets (`active=false`)
     #[arg(long, conflicts_with = "active")]
     pub inactive: bool,
+
+    /// Only open tickets: the Instance Pack's `open_rule.<table>` where defined, else `active=true`
+    #[arg(long, conflicts_with_all = ["active", "inactive", "closed"])]
+    pub open: bool,
+
+    /// Only closed tickets: the pack's `closed_rule.<table>` where defined, else `active=false`
+    #[arg(long, conflicts_with_all = ["active", "inactive", "open"])]
+    pub closed: bool,
 
     /// Filter by one or more state labels or codes (comma-separated)
     #[arg(long, value_delimiter = ',')]
@@ -461,7 +470,7 @@ pub struct UpdateArgs {
     pub assign_to: Option<String>,
 
     /// Assign ticket to assignment group (group name or `sys_id`)
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["assignment-group", "assign-to-group"])]
     pub group: Option<String>,
 
     /// Update `short_description`
@@ -527,7 +536,7 @@ pub struct CreateArgs {
     pub assign_to: Option<String>,
 
     /// Assignment group (group name or `sys_id`)
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["assignment-group", "assign-to-group"])]
     pub group: Option<String>,
 
     /// Caller / requested-for user (`@me`, username, email, or `sys_id`)

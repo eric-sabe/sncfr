@@ -11,6 +11,29 @@ pub const DYNAMIC_ME_SYS_ID: &str = "90d1921e5f510100a9ad2572f2b477fe";
 /// Standard ServiceNow Dynamic Filter Option `sys_id` for "One of My Groups" (`getMyGroups()`).
 pub const DYNAMIC_MY_GROUPS_SYS_ID: &str = "d6435e965f510100a9ad2572f2b47744";
 
+/// `name` plus each of the pack's `groups.suffixes` appended (Q-5): `Network` →
+/// `Network`, `Network - L2`, `Network - L3`.
+pub fn expand_group_names(pack: &crate::pack::MergedPack, name: &str) -> Vec<String> {
+    std::iter::once(name.to_string())
+        .chain(pack.groups.suffixes.iter().map(|s| format!("{name}{s}")))
+        .collect()
+}
+
+/// The footer note for a suffix-expanded `--group` filter, if any.
+pub fn group_expansion_note(
+    pack: &crate::pack::MergedPack,
+    filters: &ListFilterArgs,
+) -> Option<String> {
+    let g = filters.group.as_deref()?.trim();
+    if g.eq_ignore_ascii_case("@my-groups") || is_sys_id(g) || pack.groups.suffixes.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "group: {g} → {} (suffix expansion)",
+        expand_group_names(pack, g).join(", ")
+    ))
+}
+
 /// Strongly-typed fluent builder for ServiceNow encoded query strings (`sysparm_query`).
 ///
 /// Reference: `ServiceNow/ServiceNowDocs` -> `c_EncodedQueryStrings.md` & `r_OpAvailableFiltersQueries.md`.
@@ -198,6 +221,149 @@ impl EncodedQuery {
         parts.extend(self.orders.iter().cloned());
         parts.join("^")
     }
+
+    /// Builds the query with an [`OpenPlan`] applied: one alternative is ANDed in; several
+    /// become `^NQ` blocks that each repeat the other clauses, with ORDERBY once at the end.
+    pub fn build_with(&self, plan: &OpenPlan) -> String {
+        let base = self.clauses.join("^");
+        let with_base = |alt: &str| {
+            if base.is_empty() {
+                alt.to_string()
+            } else {
+                format!("{base}^{alt}")
+            }
+        };
+        let body = match plan.alternatives.as_slice() {
+            [] => base.clone(),
+            alts => alts
+                .iter()
+                .map(|a| with_base(a))
+                .collect::<Vec<_>>()
+                .join("^NQ"),
+        };
+        let mut parts = vec![body];
+        parts.extend(self.orders.iter().cloned());
+        parts.retain(|p| !p.is_empty());
+        parts.join("^")
+    }
+}
+
+/// An open/closed rule that was applied to a query (Q-2), reported in output envelopes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AppliedRule {
+    pub table: String,
+    pub query: String,
+    #[serde(default)]
+    pub workaround: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defect_ref: Option<String>,
+}
+
+/// How `--open` / `--closed` apply to a query, plus notes for literal `--active`/`--inactive`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenPlan {
+    pub alternatives: Vec<String>,
+    pub applied: Vec<AppliedRule>,
+    pub notes: Vec<String>,
+}
+
+/// Plans `--open` / `--closed` for `table` from the pack's `open_rule` / `closed_rule` (Q-2, Q-3).
+/// On `task` with no `task`-level rule, children with rules get their own `^NQ` block and the
+/// rest use `active=true` / `active=false`.
+pub fn plan_open_rules(
+    pack: &crate::pack::MergedPack,
+    table: &str,
+    filters: &ListFilterArgs,
+) -> Result<OpenPlan, SncfrError> {
+    let mut plan = OpenPlan::default();
+    let has_open_rule = |t: &str| pack.open_rules.contains_key(t);
+    let task_children: Vec<String> = pack
+        .hierarchy
+        .iter()
+        .filter(|(_, parent)| parent.value == "task")
+        .map(|(child, _)| child.clone())
+        .collect();
+    if filters.active || filters.inactive {
+        let ruled = has_open_rule(table)
+            || (table == "task" && task_children.iter().any(|c| has_open_rule(c)));
+        if ruled {
+            let flag = if filters.active {
+                "--active"
+            } else {
+                "--inactive"
+            };
+            let literal = if filters.active {
+                "active=true"
+            } else {
+                "active=false"
+            };
+            let alt = if filters.active { "--open" } else { "--closed" };
+            plan.notes.push(format!(
+                "{table} has an open rule; {flag} is literal {literal}. Use {alt} for the pack's definition."
+            ));
+        }
+        return Ok(plan);
+    }
+    if !filters.open && !filters.closed {
+        return Ok(plan);
+    }
+    let (rules, fallback, flag) = if filters.open {
+        (&pack.open_rules, "active=true", "--open")
+    } else {
+        (&pack.closed_rules, "active=false", "--closed")
+    };
+    let applied = |t: &str, r: &crate::pack::Sourced<crate::pack::schema::RuleFile>| AppliedRule {
+        table: t.to_string(),
+        query: r.value.query.clone(),
+        workaround: r.value.workaround,
+        defect_ref: r.value.defect_ref.clone(),
+    };
+    let missing_closed =
+        |t: &str| filters.closed && has_open_rule(t) && !pack.closed_rules.contains_key(t);
+    if let Some(r) = rules.get(table) {
+        plan.alternatives.push(r.value.query.clone());
+        plan.applied.push(applied(table, r));
+        return Ok(plan);
+    }
+    if missing_closed(table) {
+        return Err(SncfrError::InvalidArgs {
+            message: format!(
+                "open_rule.{table} has no closed_rule; define one in the pack or use --query"
+            ),
+            remediation: Some(format!(
+                "Add [closed_rule.{table}] to the Instance Pack, or filter with --query."
+            )),
+        });
+    }
+    if table == "task" {
+        let mut ruled = Vec::new();
+        for child in &task_children {
+            if let Some(r) = rules.get(child) {
+                plan.alternatives
+                    .push(format!("sys_class_name={child}^{}", r.value.query));
+                plan.applied.push(applied(child, r));
+                ruled.push(child.clone());
+            } else if missing_closed(child) {
+                return Err(SncfrError::InvalidArgs {
+                    message: format!(
+                        "open_rule.{child} has no closed_rule, so {flag} on task can't be applied to {child}"
+                    ),
+                    remediation: Some(format!(
+                        "Add [closed_rule.{child}] to the Instance Pack, or use --table."
+                    )),
+                });
+            }
+        }
+        if !ruled.is_empty() {
+            plan.alternatives.push(format!(
+                "sys_class_nameNOT IN{}^{fallback}",
+                ruled.join(",")
+            ));
+            return Ok(plan);
+        }
+    }
+    plan.alternatives.push(fallback.to_string());
+    Ok(plan)
 }
 
 fn strip_trailing_eq(raw: &str) -> &str {
@@ -580,7 +746,28 @@ pub fn compile_list_filters(
         } else if is_sys_id(trimmed) {
             eq.equals("assignment_group", trimmed);
         } else {
-            eq.equals("assignment_group.name", trimmed);
+            let names = expand_group_names(crate::pack::active(), trimmed);
+            match names.as_slice() {
+                // No suffixes configured: exactly the 0.1.x query.
+                [only] => {
+                    eq.equals("assignment_group.name", only);
+                }
+                many if many.iter().any(|n| crate::untrusted::needs_or_chain(n)) => {
+                    for n in many {
+                        crate::untrusted::query_value(n)?;
+                    }
+                    eq.raw(
+                        &many
+                            .iter()
+                            .map(|n| format!("assignment_group.name={n}"))
+                            .collect::<Vec<_>>()
+                            .join("^OR"),
+                    );
+                }
+                many => {
+                    eq.in_list("assignment_group.name", many);
+                }
+            }
         }
     }
 
@@ -683,6 +870,77 @@ mod tests {
             eq.validate().is_ok(),
             "raw fragments and commas outside IN are fine"
         );
+    }
+
+    fn rules_pack(extra: &str) -> crate::pack::MergedPack {
+        let ootb = crate::pack::ootb_file();
+        let user = crate::pack::parse_pack(&format!(
+            "schema_version = 1\npack_version = \"1\"\nname = \"t\"\ninstances = [\"x\"]\n[open_rule.incident]\nquery = \"active=true^stateNOT IN6,7,8\"\nworkaround = true\ndefect_ref = \"EXC-1\"\n{extra}"
+        ))
+        .expect("pack");
+        crate::pack::MergedPack::from_layers(&[
+            (crate::pack::PackOrigin::Ootb, &ootb, None),
+            (crate::pack::PackOrigin::Profile, &user, None),
+        ])
+    }
+
+    fn flags(open: bool, closed: bool, active: bool) -> ListFilterArgs {
+        ListFilterArgs {
+            open,
+            closed,
+            active,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn open_uses_the_tables_rule_and_task_splits_per_child() {
+        // CT-36 (Q-2, Q-3)
+        let pack = rules_pack("");
+        let mut eq = EncodedQuery::new();
+        eq.equals("assignment_group", "g1")
+            .order_by_desc("sys_updated_on");
+
+        let plan = plan_open_rules(&pack, "incident", &flags(true, false, false)).unwrap();
+        assert_eq!(
+            eq.build_with(&plan),
+            "assignment_group=g1^active=true^stateNOT IN6,7,8^ORDERBYDESCsys_updated_on"
+        );
+        assert_eq!(plan.applied[0].defect_ref.as_deref(), Some("EXC-1"));
+
+        let plan = plan_open_rules(&pack, "task", &flags(true, false, false)).unwrap();
+        assert_eq!(
+            eq.build_with(&plan),
+            "assignment_group=g1^sys_class_name=incident^active=true^stateNOT IN6,7,8^NQassignment_group=g1^sys_class_nameNOT INincident^active=true^ORDERBYDESCsys_updated_on"
+        );
+
+        let plan = plan_open_rules(&pack, "sc_req_item", &flags(true, false, false)).unwrap();
+        assert_eq!(plan.alternatives, vec!["active=true".to_string()]);
+        assert!(plan.applied.is_empty());
+    }
+
+    #[test]
+    fn closed_needs_a_closed_rule_and_active_stays_literal_with_a_note() {
+        // CT-36b
+        let pack = rules_pack("");
+        let err = plan_open_rules(&pack, "incident", &flags(false, true, false)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("open_rule.incident has no closed_rule")
+        );
+        let err = plan_open_rules(&pack, "task", &flags(false, true, false)).unwrap_err();
+        assert!(err.to_string().contains("can't be applied to incident"));
+
+        let pack = rules_pack("[closed_rule.incident]\nquery = \"stateIN6,7,8\"\n");
+        let plan = plan_open_rules(&pack, "incident", &flags(false, true, false)).unwrap();
+        assert_eq!(plan.alternatives, vec!["stateIN6,7,8".to_string()]);
+
+        let plan = plan_open_rules(&pack, "incident", &flags(false, false, true)).unwrap();
+        assert!(
+            plan.alternatives.is_empty(),
+            "--active is applied literally by the compiler"
+        );
+        assert!(plan.notes[0].contains("--active is literal active=true"));
     }
 
     #[test]

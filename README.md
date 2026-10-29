@@ -126,11 +126,15 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 | A dossier section times out (e.g. a slow journal) | whole `show` fails | exit `0`; that section is `timed_out` (`sections`, `degraded`) |
 | `/api/now/batch` missing on the instance | tried on every `show` | remembered for 7 days (`capabilities.json`); concurrent GETs used |
 | A write times out after sending | exit `7` network error | exit `7` `WRITE_OUTCOME_UNKNOWN` (check before retrying) |
+| A hyphenated ticket number (`ABC-1234567`) | not recognized (exit 5) | resolved via its prefix; sent as `number=ABC-1234567` |
+| A known prefix's table returns 403 | exit `5` `NOT_FOUND` | exit `4` `ACL_FORBIDDEN` naming the table |
+| `--open` / `--closed` | n/a | apply the pack's open/closed rule (e.g. resolved incidents that keep `active=true`); `--active` stays literal |
 | `list` JSON | no `has_more` | `has_more` (inferred from `count == limit`); `total` only with `--with-count` |
 | `list`/`stats`/`feed` `--state`/`--priority` | sent as typed | resolved per table (e.g. `--priority low` → `5` with a pack); unverifiable values sent as typed with an in-band ⚠ |
 | `--group Storage` where only `Storage - L2` exists (pack suffixes) | not found | resolves via suffix, shown as `group:suffix " - L2"` |
 | A field the instance silently ignored on write | reported as committed | exit `9` `WRITE_NOT_APPLIED` with `not_applied` |
 | `--write` with a pack whose `instances` excludes this instance | n/a | exit `2` `PACK_NOT_FOR_INSTANCE` |
+| `list --group Network` with pack suffixes | `assignment_group.name=Network` | `assignment_group.nameINNetwork,Network - L2,Network - L3`, with a footer note |
 
 ---
 

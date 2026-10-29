@@ -115,10 +115,11 @@ All subcommands accept the following global flags:
 
 ### 5.1 Ticket Prefix Auto-Resolution
 
-Commands that accept a `<TICKET>` identifier accept any ticket number (case-insensitive, e.g., `INC0010042`, `ritm0049210`, `CHG0031002`, `SCTASK0019283`, `PRB0010011`, `REQ0010200`, `CS0010400`, or custom prefixes like `SEC0010099`):
-1. Looks up the prefix in the local instance metadata cache (seeded from `sys_number` + standard built-in ITIL prefixes).
+Commands that accept a `<TICKET>` identifier accept any ticket number, with one optional `-` between prefix and digits (e.g. `ABC-1234567`; the separator is kept in the `number=` query, ID-2) (case-insensitive, e.g., `INC0010042`, `ritm0049210`, `CHG0031002`, `SCTASK0019283`, `PRB0010011`, `REQ0010200`, `CS0010400`, or custom prefixes like `SEC0010099`):
+1. Looks up the prefix in the effective prefix map (ID-1): the `ootb` pack's defaults, overridden by `sys_number` (when readable), then by prefixes learned from step 3, then by the user pack's `[prefixes]`. Learned prefixes survive a `sys_number` resync.
 2. Queries the resolved specific table (e.g., `incident`, `sc_req_item`, `change_request`) by `number=<TICKET>`.
-3. If the prefix is unknown or missing from `sys_number`, queries the base `task` table (`number=<TICKET>`) to discover `sys_class_name` (the concrete child table) and `sys_id`, then fetches the full child-table record.
+3. A `403` on the table (or on `task` in step 3) is exit `4` `ACL_FORBIDDEN` naming the table (ID-4); only an empty result everywhere is exit `5`.
+4. If the prefix is unknown or missing from `sys_number`, queries the base `task` table (`number=<TICKET>`) to discover `sys_class_name` (the concrete child table) and `sys_id`, then fetches the full child-table record.
 
 ### 5.2 Top-Level Exploration & Monitoring Commands (Read-Only)
 
@@ -135,9 +136,10 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
     - `--mine` (`assigned_to=@me` or `caller_id=@me` / `opened_by=@me` / `requested_for=@me`)
     - `--assigned-to <user|@me|unassigned>`
     - `--opened-by <user|@me>`
-    - `--group <group|@my-groups>`
+    - `--group <group|@my-groups>` (alias `--assignment-group`; Q-4, Q-5): with pack `groups.suffixes`, a name expands to itself plus each suffix (`--group Network` → `assignment_group.nameINNetwork,Network - L2,Network - L3`), and Markdown/terminal output shows `group: Network → … (suffix expansion)` as a footer. A name containing a comma cannot go in an `IN` list, so it is sent as an `assignment_group.name=…^OR…` chain. `update`/`create` accept `--assignment-group` and `--assign-to-group` as aliases of `--group`.
     - `--watch-list <user|@me>`
-    - `--active` / `--inactive` / `--state <state,...>`
+    - `--active` / `--inactive` (always literal `active=true` / `active=false`; a note is printed when the table has a pack open rule) / `--state <state,...>`
+    - `--open` / `--closed` (Q-2, Q-3): the Instance Pack's `open_rule.<table>` / `closed_rule.<table>` where defined, else `active=true` / `active=false`. `--closed` exits `2` when the table has only an `open_rule`. On `task` with no `task`-level rule, each child table with a rule gets its own `^NQ` block, and the rest use the fallback. Envelopes list the applied rules (`open_rules[]`, with workaround and `defect_ref`), and Markdown/terminal output shows them as a footer.
     - `--priority <1..5,...>`
     - `--state` / `--priority` values resolve per target table through the same chain as mutations (§4.2, Q-1). A `task`-level query with no `task`-level definition requires every child table with a known set (pack or schema cache) to agree, else exit `2` naming the tables. Values that can't be verified are sent as typed and reported in-band (a ⚠ line above the results; envelope `unverified_filters[]`); this never blocks a read.
     - `--updated-since <duration|timestamp>` (e.g., `4h`, `2d`, `2026-10-20`)

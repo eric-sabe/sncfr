@@ -590,3 +590,97 @@ async fn journal_queries_carry_the_table_name_for_the_index() {
         );
     }
 }
+
+#[tokio::test]
+async fn hyphenated_ticket_numbers_resolve_and_keep_their_separator() {
+    // CT-33 (ID-2)
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&["--json", "show", "abc-1234567"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.json()["table"], "u_abc_request");
+    let sent: Vec<String> = corp
+        .queries_to("/api/now/table/u_abc_request")
+        .await
+        .iter()
+        .filter_map(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .find(|(k, _)| k == "sysparm_query")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect();
+    assert!(sent.iter().any(|q| q == "number=ABC-1234567"), "{sent:?}");
+}
+
+#[tokio::test]
+async fn open_applies_the_packs_rule_and_reports_it() {
+    // CT-36 (e2e)
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&["--json", "list", "--table", "incident", "--open"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let env = out.json();
+    assert!(
+        env["query"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("active=true^stateNOT IN6,7,8"),
+        "{}",
+        env["query"]
+    );
+    assert_eq!(env["open_rules"][0]["workaround"], true);
+
+    let literal = corp.run(&["-o", "md", "list", "--table", "incident", "--active"]);
+    assert!(
+        literal.stdout.contains("--active is literal active=true"),
+        "{}",
+        literal.stdout
+    );
+}
+
+#[tokio::test]
+async fn list_group_filters_expand_through_the_suffix_convention() {
+    // CT-16, CT-67 (Q-5)
+    let corp = ExampleCorp::start().await;
+    let out = corp.run(&[
+        "--json", "list", "--table", "incident", "--group", "Network",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let q = out.json()["query"].as_str().unwrap_or_default().to_string();
+    assert!(
+        q.contains("assignment_group.nameINNetwork,Network - L2,Network - L3"),
+        "{q}"
+    );
+
+    let md = corp.run(&[
+        "-o",
+        "md",
+        "list",
+        "--table",
+        "incident",
+        "--assignment-group",
+        "Network",
+    ]);
+    assert!(
+        md.stdout
+            .contains("group: Network → Network, Network - L2, Network - L3 (suffix expansion)"),
+        "{}",
+        md.stdout
+    );
+
+    let comma = corp.run(&[
+        "--json",
+        "list",
+        "--table",
+        "incident",
+        "--group",
+        "Ops, EMEA",
+    ]);
+    assert_eq!(comma.code, 0, "{}", comma.stderr);
+    let q = comma.json()["query"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        q.contains("assignment_group.name=Ops, EMEA^ORassignment_group.name=Ops, EMEA - L2^ORassignment_group.name=Ops, EMEA - L3"),
+        "{q}"
+    );
+}

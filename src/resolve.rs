@@ -11,16 +11,19 @@ pub fn builtin_prefixes() -> BTreeMap<String, String> {
     crate::pack::active().prefix_map()
 }
 
-/// Splits a ticket number like `"inc0010042"` into `Some(("INC", "INC0010042"))`.
+/// Splits a ticket number like `"inc0010042"` into `Some(("INC", "INC0010042"))`. One `-` between
+/// the prefix and the digits is accepted (`"abc-1234567"` → `("ABC", "ABC-1234567")`); the number
+/// keeps its separator when it is sent to `number=` (ID-2).
 pub fn split_ticket_prefix(raw: &str) -> Option<(String, String)> {
     let trimmed = raw.trim();
     let first_digit_idx = trimmed.find(|c: char| c.is_ascii_digit())?;
     if first_digit_idx == 0 {
         return None;
     }
-    let prefix = &trimmed[..first_digit_idx];
+    let head = &trimmed[..first_digit_idx];
     let rest = &trimmed[first_digit_idx..];
-    if !prefix.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
+    let prefix = head.strip_suffix('-').unwrap_or(head);
+    if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
         return None;
     }
     if !rest.chars().any(|c| c.is_ascii_digit()) {
@@ -48,32 +51,71 @@ pub fn resolve_table_name(table_or_prefix: &str, prefixes: &CachedPrefixes) -> S
     trimmed.to_ascii_lowercase()
 }
 
+/// The effective prefix map (ID-1): `ootb` defaults < `sys_number` < learned < user pack.
+pub fn effective_prefixes(
+    sys_number: &BTreeMap<String, String>,
+    learned: &BTreeMap<String, String>,
+    pack: &crate::pack::MergedPack,
+) -> BTreeMap<String, String> {
+    let mut map: BTreeMap<String, String> = pack
+        .prefixes
+        .iter()
+        .filter(|(_, v)| v.origin == crate::pack::PackOrigin::Ootb)
+        .map(|(k, v)| (k.clone(), v.value.clone()))
+        .collect();
+    map.extend(sys_number.iter().map(|(k, v)| (k.clone(), v.clone())));
+    map.extend(learned.iter().map(|(k, v)| (k.clone(), v.clone())));
+    map.extend(
+        pack.prefixes
+            .iter()
+            .filter(|(_, v)| v.origin != crate::pack::PackOrigin::Ootb)
+            .map(|(k, v)| (k.clone(), v.value.clone())),
+    );
+    map
+}
+
 /// Loads [`CachedPrefixes`] from `prefixes.json` if fresh, or syncs from `sys_number` (falling back
-/// gracefully to built-in ITIL prefixes on `403 Forbidden`).
+/// to the pack's prefixes on `403 Forbidden`). Returns the effective map; learned prefixes survive
+/// a resync.
 pub async fn load_or_sync_prefixes(
     client: &ReadOnlyClient,
     cache: &InstanceCache,
     force_sync: bool,
 ) -> Result<CachedPrefixes, SncfrError> {
-    if !force_sync && let Ok(Some(mut cached)) = cache.read_prefixes() {
-        for (k, v) in builtin_prefixes() {
-            cached.prefixes.entry(k).or_insert(v);
-        }
-        return Ok(cached);
+    let pack = crate::pack::active();
+    if !force_sync && let Ok(Some(cached)) = cache.read_prefixes() {
+        return Ok(CachedPrefixes {
+            prefixes: effective_prefixes(&cached.prefixes, &cached.learned, pack),
+            learned: cached.learned,
+        });
     }
+    let learned = cache
+        .read_allow_stale::<CachedPrefixes>(std::path::Path::new("prefixes.json"))
+        .ok()
+        .flatten()
+        .map(|(p, _)| p.learned)
+        .unwrap_or_default();
 
-    let mut prefixes = builtin_prefixes();
+    let mut sys_number = BTreeMap::new();
     let query = [
         ("sysparm_fields", "prefix,category"),
         ("sysparm_limit", "500"),
         ("sysparm_display_value", "false"),
     ];
-
+    use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
     match client
         .get_json::<Value>("/api/now/table/sys_number", &query)
         .await
     {
         Ok(resp) => {
+            CapabilityRecord::observe(
+                cache,
+                Capability::NumberTableReadable,
+                CapState::Available,
+                CapSource::Observed,
+                Some(200),
+                None,
+            );
             if let Some(rows) = resp.get("result").and_then(Value::as_array) {
                 for row in rows {
                     if let (Some(prefix), Some(category)) = (
@@ -83,7 +125,7 @@ pub async fn load_or_sync_prefixes(
                         let p = prefix.trim().to_ascii_uppercase();
                         let c = category.trim().to_ascii_lowercase();
                         if !p.is_empty() && !c.is_empty() {
-                            prefixes.insert(p, c);
+                            sys_number.insert(p, c);
                         }
                     }
                 }
@@ -95,14 +137,33 @@ pub async fn load_or_sync_prefixes(
         Err(SncfrError::AuthRequired { profile }) => {
             return Err(SncfrError::AuthRequired { profile });
         }
-        Err(_) => {
-            // Non-admin ACL 403 or missing `sys_number` access: keep built-in ITIL prefixes
+        Err(SncfrError::AclForbidden { .. }) => {
+            // Common for non-admins: the pack's prefixes and the task fallback still work.
+            CapabilityRecord::observe(
+                cache,
+                Capability::NumberTableReadable,
+                CapState::Unauthorized,
+                CapSource::Observed,
+                Some(403),
+                Some(CapHint::Acl),
+            );
         }
+        Err(_) => {}
     }
 
-    let cached = CachedPrefixes { prefixes };
-    let _ = cache.write_prefixes(&cached);
-    Ok(cached)
+    // On disk: what sys_number returned plus learned prefixes (kept separately so a resync
+    // keeps them).
+    let mut on_disk = sys_number;
+    on_disk.extend(learned.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let stored = CachedPrefixes {
+        prefixes: on_disk,
+        learned,
+    };
+    let _ = cache.write_prefixes(&stored);
+    Ok(CachedPrefixes {
+        prefixes: effective_prefixes(&stored.prefixes, &stored.learned, pack),
+        learned: stored.learned,
+    })
 }
 
 /// Resolved ticket metadata and full concrete-table JSON record (`sysparm_display_value=all`).
@@ -139,8 +200,14 @@ pub async fn resolve_ticket(
         {
             // Learn the newly discovered custom prefix -> concrete table mapping in cache!
             if resolved.table != "task" {
-                prefixes.prefixes.insert(prefix, resolved.table.clone());
-                let _ = cache.write_prefixes(&prefixes);
+                prefixes
+                    .learned
+                    .insert(prefix.clone(), resolved.table.clone());
+                // Store the sys_number part as-is plus the learned map (not the effective map).
+                let mut stored = cache.read_prefixes().ok().flatten().unwrap_or_default();
+                stored.learned.clone_from(&prefixes.learned);
+                stored.prefixes.insert(prefix, resolved.table.clone());
+                let _ = cache.write_prefixes(&stored);
             }
             return Ok(resolved);
         }
@@ -223,7 +290,12 @@ async fn query_ticket_in_table(
                 record: first,
             }))
         }
-        Err(SncfrError::AclForbidden { .. } | SncfrError::NotFound { .. }) => Ok(None),
+        // ID-4: a forbidden table is not a missing ticket.
+        Err(SncfrError::AclForbidden { details, .. }) => Err(SncfrError::AclForbidden {
+            resource: table.to_string(),
+            details,
+        }),
+        Err(SncfrError::NotFound { .. }) => Ok(None),
         Err(err) => Err(err),
     }
 }
@@ -242,7 +314,13 @@ async fn query_ticket_via_task_fallback(
 
     let resp: Value = match client.get_json("/api/now/table/task", &query).await {
         Ok(r) => r,
-        Err(SncfrError::AclForbidden { .. } | SncfrError::NotFound { .. }) => return Ok(None),
+        Err(SncfrError::AclForbidden { details, .. }) => {
+            return Err(SncfrError::AclForbidden {
+                resource: "task".to_string(),
+                details,
+            });
+        }
+        Err(SncfrError::NotFound { .. }) => return Ok(None),
         Err(err) => return Err(err),
     };
 
@@ -311,6 +389,18 @@ mod tests {
             Some(("U_SEC".to_string(), "U_SEC009911".to_string()))
         );
         assert_eq!(split_ticket_prefix("12345"), None);
+    }
+
+    #[test]
+    fn accepts_one_hyphen_between_prefix_and_digits() {
+        // ID-2
+        assert_eq!(
+            split_ticket_prefix("abc-1234567"),
+            Some(("ABC".to_string(), "ABC-1234567".to_string()))
+        );
+        assert_eq!(split_ticket_prefix("ABC--1234567"), None);
+        assert_eq!(split_ticket_prefix("-1234567"), None);
+        assert_eq!(split_ticket_prefix("A-B-1234567"), None);
     }
 
     #[tokio::test]
@@ -386,5 +476,104 @@ mod tests {
             cached_prefixes.prefixes.get("SEC").map(String::as_str),
             Some("u_security_incident")
         );
+    }
+
+    #[test]
+    fn effective_prefixes_layer_ootb_sys_number_learned_then_user_pack() {
+        // ID-1
+        let ootb = crate::pack::ootb_file();
+        let user = crate::pack::parse_pack(
+            "schema_version = 1\npack_version = \"1\"\nname = \"t\"\ninstances = [\"x\"]\n[prefixes]\nINC = \"u_incident_override\"\nABC = \"u_abc_request\"\n",
+        )
+        .expect("pack");
+        let pack = crate::pack::MergedPack::from_layers(&[
+            (crate::pack::PackOrigin::Ootb, &ootb, None),
+            (crate::pack::PackOrigin::Profile, &user, None),
+        ]);
+        let sys_number: BTreeMap<String, String> = [
+            ("INC".to_string(), "incident".to_string()),
+            ("SEC".to_string(), "u_sec".to_string()),
+        ]
+        .into();
+        let learned: BTreeMap<String, String> =
+            [("SEC".to_string(), "u_security_incident".to_string())].into();
+        let map = effective_prefixes(&sys_number, &learned, &pack);
+        assert_eq!(map["INC"], "u_incident_override", "user pack wins");
+        assert_eq!(
+            map["SEC"], "u_security_incident",
+            "learned beats sys_number"
+        );
+        assert_eq!(map["ABC"], "u_abc_request");
+        assert_eq!(map["RITM"], "sc_req_item", "ootb fills the rest");
+    }
+
+    #[tokio::test]
+    async fn learned_prefixes_survive_a_forced_resync() {
+        // ID-3 (the old resync dropped them)
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/sys_number"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(json!({ "error": { "message": "denied" } })),
+            )
+            .mount(&server)
+            .await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        cache
+            .write_prefixes(&CachedPrefixes {
+                prefixes: BTreeMap::new(),
+                learned: [("SEC".to_string(), "u_security_incident".to_string())].into(),
+            })
+            .expect("seed");
+        let synced = load_or_sync_prefixes(&client, &cache, true)
+            .await
+            .expect("sync");
+        assert_eq!(
+            synced.prefixes.get("SEC").map(String::as_str),
+            Some("u_security_incident")
+        );
+        assert_eq!(
+            synced.prefixes.get("INC").map(String::as_str),
+            Some("incident")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_table_for_a_known_prefix_is_exit_4_naming_it() {
+        // CT-34 (ID-4)
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/now/table/incident"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(json!({ "error": { "message": "denied" } })),
+            )
+            .mount(&server)
+            .await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        let err = resolve_ticket(&client, &cache, "INC0012345")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().exit_code(), 4, "{err}");
+        assert!(err.to_string().contains("'incident'"), "{err}");
     }
 }
