@@ -83,6 +83,9 @@ pub struct ProfileConfig {
     /// `"always"` applies the pack's agent write marker even in interactive use (SAFE-8).
     #[serde(default, skip_serializing_if = "AgentMarkerMode::is_auto")]
     pub agent_marker: AgentMarkerMode,
+    /// Default `skill install --overlay` file (SKILL-1); `~` and relative paths as for `pack`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_overlay: Option<String>,
 }
 
 /// When the pack's `audit.agent_write_marker` is applied (SAFE-8).
@@ -138,6 +141,8 @@ pub struct ResolvedProfile {
     pub timeout_secs: Option<u64>,
     /// Profile `agent_marker`.
     pub agent_marker: AgentMarkerMode,
+    /// Resolved profile `skill_overlay`, if any.
+    pub skill_overlay: Option<PathBuf>,
 }
 
 impl ResolvedProfile {
@@ -402,6 +407,11 @@ impl AppConfig {
                     pack_locked: profile_cfg.pack_locked,
                     timeout_secs: profile_cfg.timeout_secs,
                     agent_marker: profile_cfg.agent_marker,
+                    skill_overlay: profile_cfg
+                        .skill_overlay
+                        .as_deref()
+                        .map(resolve_pack_path)
+                        .transpose()?,
                 });
             } else if cli.profile.is_some() && cli.instance.is_none() {
                 let available: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
@@ -437,6 +447,7 @@ impl AppConfig {
                 pack_locked: false,
                 timeout_secs: None,
                 agent_marker: AgentMarkerMode::Auto,
+                skill_overlay: None,
             });
         }
 
