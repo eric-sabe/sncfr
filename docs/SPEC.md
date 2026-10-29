@@ -81,7 +81,7 @@ When a mutating command (`comment`, `note`, `update`, `create`, `attach`, `appro
 3. Outputs a structured **Dry-Run Preview**:
    - Target ticket number, table, `sys_id`, and URL.
    - Before $\to$ After field diff (showing both human display values and underlying internal values).
-   - For every field, a **Source** (`pack`, `ootb`, `cache`, `sys_choice`, `discovered`, `input`, or `none`) and a **Status** (`verified`, `verified (in-use set)`, `UNVERIFIABLE (<reason>)`, or `n/a (free text)`). JSON carries the same as `diffs[].source` / `diffs[].status`, plus `diffs[].unverifiable` (`would_send`, `reason`, `candidates`, `suggested`).
+   - For every field, a **Source** (`pack`, `ootb`, `cache`, `sys_choice`, `discovered`, `input`, `input + marker`, or `none`) and a **Status** (`verified`, `verified (in-use set)`, `UNVERIFIABLE (<reason>)`, or `n/a (free text)`). JSON carries the same as `diffs[].source` / `diffs[].status`, plus `diffs[].unverifiable` (`would_send`, `reason`, `candidates`, `suggested`).
    - Exact command with `--write` to commit the change.
 4. Exits cleanly without mutating the instance (exit `0`), or exits `8` (`UNVERIFIABLE`) when any value could not be confirmed. Dry-run and `--write` run the same check: every mutation of an invocation is checked before the first request is sent, so `--write` with an unverifiable value sends nothing.
 5. **Write path**: mutations are built only from resolved values and sent only through the write gate (`src/write_gate.rs`; ADR-0002 amendment). After each record write, the returned record is compared with what was sent (exit `9` on a mismatch).
@@ -160,12 +160,13 @@ Commands that accept a `<TICKET>` identifier accept any ticket number, with one 
 
 ### 5.3 Top-Level Ticket Mutation Commands (Dry-Run by Default, `--write` to Commit)
 
-- **`sncfr comment <TICKET> <MESSAGE> [--file <path>] [--write]`**
+- **`sncfr comment <TICKET> <MESSAGE> [--file <path>] [--allow-code-tag] [--write]`**
   - Posts a customer-visible comment (`comments` field).
-- **`sncfr note <TICKET> <MESSAGE> [--file <path>] [--write]`**
+- **`sncfr note <TICKET> <MESSAGE> [--file <path>] [--allow-code-tag] [--write]`**
   - Posts an internal fulfiller work note (`work_notes` field).
+- **Agent write marker (SAFE-8, NA-12)**: when a loaded pack sets `audit.agent_write_marker` and the invocation is non-interactive (`--no-interactive`, `SNCFR_AGENT=1`, a non-TTY **stdin**, or profile `agent_marker = "always"`; piping stdout alone does not count), every `comments` / `work_notes` payload (`comment`, `note`, `update --comment/--note`, approval comments) begins with `"<marker> "`. The preview shows the marked text with Source `input + marker`. No flag removes it. The marker records provenance; it is not authentication. A body containing `[code]` (which ServiceNow renders as raw HTML) is exit `2` unless `--allow-code-tag` is given (comment, note, update), and even then a warning is printed. Approval comments have no such flag, so `[code]` there is always refused.
 - **`sncfr update <TICKET> [flags] [--write]`**
-  - Ergonomic flags: `--state <val>`, `--priority <val>`, `--urgency <val>`, `--impact <val>`, `--assign-to <user|@me|none>`, `--group <group>`, `--short-description <text>`, `--close-code <val>`, `--close-notes <text>`, `--note <work_note>`, `--comment <comment>`, `--set <field=value>...`.
+  - Ergonomic flags: `--state <val>`, `--priority <val>`, `--urgency <val>`, `--impact <val>`, `--assign-to <user|@me|none>`, `--group <group>`, `--short-description <text>`, `--close-code <val>`, `--close-notes <text>`, `--note <work_note>`, `--comment <comment>`, `--set <field=value>...`, `--allow-code-tag`.
   - Validates choice values and user/group references before previewing or writing.
   - **References never guess (SAFE-7)**: `--group` tries an exact match in `@my-groups`, then an exact `sys_user_group` name, then the pack's `groups.suffixes` (e.g. `Storage` → `Storage - L2`). Users match one `user_name`/`email`/`name`. More than one candidate at any step exits `2` `AMBIGUOUS_REFERENCE`, listing candidates (★ marks your own groups) and any pack `suggest_map` suggestion, which is never applied. The preview's Source shows how each reference resolved (`group:exact`, `group:suffix " - L2"`, `group:my_groups`, `user:@me`, ...).
 - **`sncfr create <table|prefix> [flags] [--write]`**
@@ -249,6 +250,7 @@ auth_method = "sso"
 read_only = false # Set to true to hard-block --write on this profile
 pack = "packs/mycompany.pack.toml" # Optional Instance Pack (§7.3); relative to this file's directory
 pack_locked = false # Set to true to reject --pack / SNCFR_PACK overrides
+agent_marker = "auto" # "always" applies the pack's agent write marker even interactively (SAFE-8)
 
 [profiles.prod.views]
 my-active = { table = "task", query = "assigned_toDYNAMIC90d1921e5f510100a9ad2572f2b477fe^active=true" }
