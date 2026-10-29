@@ -232,6 +232,70 @@ pub fn report_error(report: &MutationReport) -> Option<SncfrError> {
     None
 }
 
+/// The pack's agent write marker for this invocation (SAFE-8), installed once by `main` when the
+/// invocation is non-interactive. `None` means comments and notes are sent as typed.
+static JOURNAL_MARKER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Whether this invocation counts as an agent's (SAFE-8): `--no-interactive`, `SNCFR_AGENT=1`, a
+/// non-TTY stdin, or profile `agent_marker = "always"`. stdout piping alone does not count.
+pub fn agent_invocation(
+    no_interactive: bool,
+    agent_env: Option<&str>,
+    stdin_is_tty: bool,
+    profile: crate::config::AgentMarkerMode,
+) -> bool {
+    no_interactive
+        || agent_env.is_some_and(|v| v.trim() == "1")
+        || !stdin_is_tty
+        || profile == crate::config::AgentMarkerMode::Always
+}
+
+/// Installs the marker applied to every `comments` / `work_notes` payload of this invocation.
+pub fn install_journal_marker(marker: Option<String>) -> bool {
+    JOURNAL_MARKER.set(marker).is_ok()
+}
+
+fn journal_marker() -> Option<&'static str> {
+    JOURNAL_MARKER.get().and_then(Option::as_deref)
+}
+
+/// A `comments` / `work_notes` payload: `[code]` (rendered as HTML by ServiceNow) needs
+/// `allow_code_tag`, and the marker, when set, is prepended as `"<marker> "` (NA-12). Returns the
+/// payload and whether it was marked.
+pub fn journal_payload(
+    body: &str,
+    marker: Option<&str>,
+    allow_code_tag: bool,
+) -> Result<(String, bool), SncfrError> {
+    if body.to_ascii_lowercase().contains("[code]") {
+        if !allow_code_tag {
+            return Err(SncfrError::InvalidArgs {
+                message: "The body contains `[code]`, which ServiceNow renders as raw HTML"
+                    .to_string(),
+                remediation: Some(
+                    "Remove the `[code]` tag, or pass --allow-code-tag if the HTML is intended."
+                        .to_string(),
+                ),
+            });
+        }
+        eprintln!("warning: the body contains `[code]`; ServiceNow will render it as raw HTML");
+    }
+    match marker.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) if !body.starts_with(&format!("{m} ")) => Ok((format!("{m} {body}"), true)),
+        Some(_) => Ok((body.to_string(), true)),
+        None => Ok((body.to_string(), false)),
+    }
+}
+
+/// [`journal_payload`] with this invocation's marker, plus the preview `Source` label.
+pub(crate) fn marked_journal(
+    body: &str,
+    allow_code_tag: bool,
+) -> Result<(String, &'static str), SncfrError> {
+    let (text, marked) = journal_payload(body, journal_marker(), allow_code_tag)?;
+    Ok((text, if marked { "input + marker" } else { "input" }))
+}
+
 /// Executes `sncfr comment` (`is_work_note = false`) or `sncfr note` (`is_work_note = true`).
 /// Runs as a Validated Dry-Run Preview when `permit` is `None`.
 pub async fn execute_comment_or_note(
@@ -241,7 +305,8 @@ pub async fn execute_comment_or_note(
     is_work_note: bool,
     permit: Option<WritePermit>,
 ) -> Result<MutationReport, SncfrError> {
-    let body_text = resolve_message_body(args)?;
+    let typed_body = resolve_message_body(args)?;
+    let (body_text, source) = marked_journal(&typed_body, args.allow_code_tag)?;
     let resolved = resolve_ticket(&client, cache, &args.ticket).await?;
     let field_name = if is_work_note {
         "work_notes"
@@ -261,7 +326,7 @@ pub async fn execute_comment_or_note(
         before_value: None,
         after_display: body_text.clone(),
         after_value: body_text.clone(),
-        source: Some("input".to_string()),
+        source: Some(source.to_string()),
         status: Some("n/a (free text)".to_string()),
         ..Default::default()
     };
@@ -285,7 +350,7 @@ pub async fn execute_comment_or_note(
         format!(
             "sncfr {op_name} {} {} --write",
             shell_quote(&resolved.number),
-            shell_quote(&body_text)
+            shell_quote(&typed_body)
         )
     };
     let gate = run_gate(client, permit, vec![mutation]).await?;
@@ -426,8 +491,14 @@ pub async fn execute_update(
         ("work_notes", &args.note),
         ("comments", &args.comment),
     ] {
-        if let Some(val) = opt_val {
-            let before = if field == "work_notes" || field == "comments" {
+        if let Some(typed) = opt_val {
+            let journal = field == "work_notes" || field == "comments";
+            let (val, source) = if journal {
+                marked_journal(typed, args.allow_code_tag)?
+            } else {
+                (typed.clone(), "input")
+            };
+            let before = if journal {
                 None
             } else {
                 extract_field_pair(&resolved.record, field)
@@ -438,11 +509,11 @@ pub async fn execute_update(
                 before_value: before.as_ref().map(|b| b.1.clone()),
                 after_display: val.clone(),
                 after_value: val.clone(),
-                source: Some("input".to_string()),
+                source: Some(source.to_string()),
                 status: Some("n/a (free text)".to_string()),
                 ..Default::default()
             });
-            fields.push((field.to_string(), val.clone(), ResolvedValue::text(val)));
+            fields.push((field.to_string(), val.clone(), ResolvedValue::text(&val)));
         }
     }
 
@@ -1150,6 +1221,41 @@ fn gate_notes(report: &MutationReport, terminal: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_invocations_get_the_marker_and_interactive_ones_do_not() {
+        // CT-38 (SAFE-8, NA-12)
+        use crate::config::AgentMarkerMode::{Always, Auto};
+        let marker = Some("[sncfr-agent]");
+        assert!(agent_invocation(true, None, true, Auto), "--no-interactive");
+        let (body, marked) = journal_payload("Rebooted the VPN gateway", marker, false).unwrap();
+        assert!(marked);
+        assert!(body.starts_with("[sncfr-agent] "), "{body}");
+
+        // stdin is a TTY and stdout is piped (`| tee`): an interactive user, no marker.
+        assert!(!agent_invocation(false, None, true, Auto));
+        assert!(
+            agent_invocation(false, Some("1"), true, Auto),
+            "SNCFR_AGENT=1"
+        );
+        assert!(
+            agent_invocation(false, None, false, Auto),
+            "stdin not a TTY"
+        );
+        assert!(
+            agent_invocation(false, None, true, Always),
+            "profile always"
+        );
+        let (body, marked) = journal_payload("typed by hand", None, false).unwrap();
+        assert_eq!((body.as_str(), marked), ("typed by hand", false));
+
+        // Never doubled; `[code]` needs --allow-code-tag.
+        let (again, _) = journal_payload("[sncfr-agent] x", marker, false).unwrap();
+        assert_eq!(again, "[sncfr-agent] x");
+        let err = journal_payload("[CODE]<b>x</b>[/code]", marker, false).unwrap_err();
+        assert_eq!(err.code().exit_code(), 2);
+        assert!(journal_payload("[code]<b>x</b>[/code]", marker, true).is_ok());
+    }
     use crate::cli::Cli;
     use crate::client::ClientAuth;
     use clap::Parser;
@@ -1228,6 +1334,7 @@ mod tests {
             comment: None,
             set_fields: vec![],
             write: false,
+            allow_code_tag: false,
         };
 
         let report = execute_update(client.clone(), &cache, &args, None)
