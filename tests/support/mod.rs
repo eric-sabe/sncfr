@@ -60,6 +60,9 @@ impl Respond for GroupDirectory {
             .map(|(_, v)| v.into_owned())
             .unwrap_or_default();
         let matches = |name: &str| -> bool {
+            if q.is_empty() {
+                return true;
+            }
             if let Some(list) = q.strip_prefix("nameIN") {
                 return list.split(',').any(|n| n == name);
             }
@@ -94,6 +97,48 @@ pub enum Scenario {
     BatchUriNotResource,
     /// `sys_journal_field` answers after 2 s (past a `--timeout 1`).
     SlowJournal,
+    /// `/api/now/stats/incident` group-by answers with in-use values: renumbered priorities
+    /// (0–5, `5 - Low`) and `u_tier` = silver, bronze (`in_use.json` "renumbered").
+    InUseRenumbered,
+    /// Like [`Scenario::InUseRenumbered`], but the in-use priorities are OOTB, with `4 - Low`.
+    InUseOotbLow,
+    /// `/api/now/stats/*` answers 403.
+    StatsUnauthorized,
+    /// `task` answers with recent rows (`number`, `sys_class_name`): three `ABC-` rows on
+    /// `u_abc_request`, two `INC` rows (`task_sample.json`).
+    TaskSample,
+}
+
+/// `/api/now/stats/<table>?sysparm_group_by=<field>` against one `in_use.json` set (incident only).
+struct InUseStats(Value);
+
+impl Respond for InUseStats {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let field = req
+            .url
+            .query_pairs()
+            .find(|(k, _)| k == "sysparm_group_by")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        // Only incident has in-use data; any other table (or a count without group-by) is empty.
+        let data = if req.url.path() == "/api/now/stats/incident" {
+            &self.0[field.as_str()]
+        } else {
+            &Value::Null
+        };
+        let rows: Vec<Value> = data
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|pair| {
+                json!({
+                    "stats": { "count": "3" },
+                    "groupby_fields": [{ "field": field, "value": pair[0], "display_value": pair[1] }]
+                })
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "result": rows }))
+    }
 }
 
 pub struct Run {
@@ -123,6 +168,20 @@ impl ExampleCorp {
     /// Starts the mock instance with the base Example Corp mocks and the example pack active.
     pub async fn start() -> Self {
         Self::start_with_pack(EXAMPLE_PACK).await
+    }
+
+    /// Starts with no user pack (the bundled ootb pack only).
+    pub async fn start_without_pack() -> Self {
+        let corp = Self::start_with_pack(EXAMPLE_PACK).await;
+        fs::write(
+            corp.dir.path().join("config.toml"),
+            format!(
+                "default_profile = \"prod\"\n\n[profiles.prod]\ninstance = \"{}\"\nauth_method = \"api-key\"\n",
+                corp.server.uri()
+            ),
+        )
+        .expect("write config");
+        corp
     }
 
     /// Starts with a custom pack text; `instances = ["example.service-now.com"]` is rewritten to
@@ -223,6 +282,32 @@ impl ExampleCorp {
                         ResponseTemplate::new(200)
                             .set_body_json(json!({ "result": [] }))
                             .set_delay(std::time::Duration::from_secs(2)),
+                    )
+                    .mount(&self.server)
+                    .await;
+            }
+            Scenario::InUseRenumbered | Scenario::InUseOotbLow => {
+                let key = if scenario == Scenario::InUseRenumbered {
+                    "renumbered"
+                } else {
+                    "ootb_low"
+                };
+                Mock::given(method("GET"))
+                    .and(wiremock::matchers::path_regex("^/api/now/stats/"))
+                    .respond_with(InUseStats(fixture("in_use.json")[key].clone()))
+                    .mount(&self.server)
+                    .await;
+            }
+            Scenario::TaskSample => {
+                self.get("task", fixture("task_sample.json")).await;
+            }
+            Scenario::StatsUnauthorized => {
+                Mock::given(method("GET"))
+                    .and(wiremock::matchers::path_regex("^/api/now/stats/"))
+                    .respond_with(
+                        ResponseTemplate::new(403).set_body_json(
+                            json!({ "error": { "message": "Insufficient rights" } }),
+                        ),
                     )
                     .mount(&self.server)
                     .await;

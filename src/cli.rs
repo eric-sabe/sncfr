@@ -151,6 +151,9 @@ pub enum Commands {
     /// Run connectivity, TLS, Corporate SSO session, and non-admin ACL capability diagnostics
     Doctor(DoctorArgs),
 
+    /// Probe the instance (read-only) and write a draft Instance Pack (DISC-4, DISC-5)
+    Discover(DiscoverArgs),
+
     /// Validate or inspect Instance Packs (ADR-0004)
     #[command(subcommand)]
     Pack(PackCommands),
@@ -161,6 +164,20 @@ pub struct DoctorArgs {
     /// Forget the capability record and re-probe every capability (CAP-2, CAP-6)
     #[arg(long)]
     pub refresh: bool,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct DiscoverArgs {
+    /// Where to write the draft (default: `<config dir>/packs/<instance-host>.draft.pack.toml`)
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Overwrite an existing file
+    #[arg(long)]
+    pub force: bool,
+    /// Read no record rows: skip task-row prefix sampling, the custom field inventory, and group
+    /// suffix detection (prefixes then come from `sys_number` only)
+    #[arg(long)]
+    pub no_samples: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -191,7 +208,8 @@ impl Commands {
             | Self::Attach(_)
             | Self::Skill(_)
             | Self::Pack(_)
-            | Self::Doctor(_) => CommandOutputShape::Dossier,
+            | Self::Doctor(_)
+            | Self::Discover(_) => CommandOutputShape::Dossier,
             Self::List(_)
             | Self::Search(_)
             | Self::Stats(_)

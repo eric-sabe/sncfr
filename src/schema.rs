@@ -16,6 +16,19 @@ pub async fn load_or_sync_table_schema(
     table_or_prefix: &str,
     force_sync: bool,
 ) -> Result<CachedTableSchema, SncfrError> {
+    load_or_sync_table_schema_with(client, cache, table_or_prefix, force_sync, true).await
+}
+
+/// As [`load_or_sync_table_schema`]; `allow_sample = false` never reads a record row
+/// (`discover --no-samples`). A schema that would have needed the sample is then returned but
+/// not cached, so later commands still get sample-record typing.
+pub async fn load_or_sync_table_schema_with(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    table_or_prefix: &str,
+    force_sync: bool,
+    allow_sample: bool,
+) -> Result<CachedTableSchema, SncfrError> {
     let prefixes = load_or_sync_prefixes(client, cache, force_sync).await?;
     let table = resolve_table_name(table_or_prefix, &prefixes);
 
@@ -136,7 +149,8 @@ pub async fn load_or_sync_table_schema(
 
     // `sys_dictionary` 403 or zero visible rows (common for non-admins): infer fields from one
     // sample record so they can at least be told apart from unknown names.
-    if fields.is_empty() && child_field_overrides.is_empty() {
+    let needs_sample = fields.is_empty() && child_field_overrides.is_empty();
+    if needs_sample && allow_sample {
         let sample_path = format!("/api/now/table/{table}");
         if let Ok(sample_resp) = client
             .get_json::<Value>(
@@ -163,6 +177,10 @@ pub async fn load_or_sync_table_schema(
                     .get("display_value")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                let link_table = v
+                    .get("link")
+                    .and_then(Value::as_str)
+                    .and_then(crate::untrusted::link_table);
                 let internal_type = if v.get("link").is_some() {
                     "inferred_reference"
                 } else if !value.is_empty() && display != value {
@@ -177,7 +195,7 @@ pub async fn load_or_sync_table_schema(
                         internal_type: internal_type.to_string(),
                         mandatory: false,
                         max_length: None,
-                        reference_table: None,
+                        reference_table: link_table,
                         is_custom: k.starts_with("u_") || k.starts_with("x_"),
                     },
                 );
@@ -194,7 +212,7 @@ pub async fn load_or_sync_table_schema(
     let mut base_choices: BTreeMap<String, Vec<CachedChoice>> = BTreeMap::new();
     let mut child_choices: BTreeMap<String, Vec<CachedChoice>> = BTreeMap::new();
 
-    if let Ok(resp) = client
+    let choice_resp = client
         .get_json::<Value>(
             "/api/now/table/sys_choice",
             &[
@@ -204,7 +222,9 @@ pub async fn load_or_sync_table_schema(
                 ("sysparm_limit", "1000"),
             ],
         )
-        .await
+        .await;
+    observe_choice_table_filter(cache, &choice_resp);
+    if let Ok(resp) = choice_resp
         && let Some(rows) = resp.get("result").and_then(Value::as_array)
     {
         for row in rows {
@@ -254,8 +274,37 @@ pub async fn load_or_sync_table_schema(
         loaded_from_cache: false,
     };
 
-    let _ = cache.write_table_schema(&schema);
+    if allow_sample || !needs_sample {
+        let _ = cache.write_table_schema(&schema);
+    }
     Ok(schema)
+}
+
+/// Records `choice_table_filter` from the `sys_choice` read (resolution step 2's input): rows →
+/// available, zero rows → unavailable (the query always includes `task`, which has choices on
+/// every instance, so zero rows means the ACL filtered them), 403 → unauthorized.
+fn observe_choice_table_filter(cache: &InstanceCache, resp: &Result<Value, SncfrError>) {
+    use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
+    let (state, status, hint) = match resp {
+        Ok(v)
+            if v.get("result")
+                .and_then(Value::as_array)
+                .is_some_and(|r| !r.is_empty()) =>
+        {
+            (CapState::Available, 200, None)
+        }
+        Ok(_) => (CapState::Unavailable, 200, Some(CapHint::ZeroRows)),
+        Err(SncfrError::AclForbidden { .. }) => (CapState::Unauthorized, 403, Some(CapHint::Acl)),
+        Err(_) => return,
+    };
+    CapabilityRecord::observe(
+        cache,
+        Capability::ChoiceTableFilter,
+        state,
+        CapSource::Observed,
+        Some(status),
+        hint,
+    );
 }
 
 /// Resolves a choice label or raw value (e.g. `"In Progress"` -> `("In Progress", "2")`) for

@@ -684,3 +684,262 @@ async fn list_group_filters_expand_through_the_suffix_convention() {
         "{q}"
     );
 }
+
+#[tokio::test]
+async fn in_use_values_verify_what_they_can_and_never_prove_absence() {
+    // CT-08, CT-08c (rows 5, 8; DISC-2, DISC-3)
+    let corp = ExampleCorp::start_without_pack().await;
+    corp.mount(support::Scenario::InUseRenumbered).await;
+    let first = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--priority",
+        "low",
+        "--write",
+    ]);
+    assert_eq!(first.code, 8, "{}", first.stderr);
+    let f = &first.json()["unverifiable_fields"][0];
+    assert_eq!(f["reason"], "ootb_unconfirmed");
+    assert_eq!(f["would_send"], "low");
+    assert_eq!(f["suggested"], "5");
+    let stats = corp.queries_to("/api/now/stats/incident").await.len();
+    assert_eq!(stats, 1);
+    let cached = std::fs::read_to_string(corp.cache_file("discovered/incident.json"))
+        .expect("discovered cache");
+    assert!(cached.contains("\"complete\": false"), "{cached}");
+
+    let again = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--priority",
+        "low",
+        "--write",
+    ]);
+    assert_eq!(again.code, 8, "{}", again.stderr);
+    assert_eq!(again.json()["unverifiable_fields"][0], *f);
+    assert_eq!(
+        corp.queries_to("/api/now/stats/incident").await.len(),
+        stats,
+        "a re-run inside the TTL sends no stats request"
+    );
+
+    let five = corp.run(&["--json", "update", "INC0012345", "--priority", "5 - Low"]);
+    assert_eq!(five.code, 0, "{}", five.stderr);
+    assert_eq!(five.json()["diffs"][0]["source"], "discovered");
+    assert_eq!(five.json()["diffs"][0]["status"], "verified (in-use set)");
+    assert!(corp.mutating_requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn an_in_use_set_confirms_an_ootb_alias() {
+    // CT-08b (row 6)
+    let corp = ExampleCorp::start_without_pack().await;
+    corp.mount(support::Scenario::InUseOotbLow).await;
+    let out = corp.run(&["--json", "update", "INC0012345", "--priority", "low"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let diff = &out.json()["diffs"][0];
+    assert_eq!(diff["after_value"], "4");
+    assert_eq!(diff["source"], "ootb");
+}
+
+#[tokio::test]
+async fn unauthorized_stats_leave_no_metadata_and_are_remembered() {
+    // CT-08d (row 7)
+    let corp = ExampleCorp::start_without_pack().await;
+    corp.mount(support::Scenario::StatsUnauthorized).await;
+    let out = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--priority",
+        "low",
+        "--write",
+    ]);
+    assert_eq!(out.code, 8, "{}", out.stderr);
+    assert_eq!(
+        out.json()["unverifiable_fields"][0]["reason"],
+        "no_metadata"
+    );
+    let caps = std::fs::read_to_string(corp.cache_file("capabilities.json")).expect("caps");
+    assert!(caps.contains("stats_group_by"), "{caps}");
+    let again = corp.run(&["--json", "update", "INC0012345", "--priority", "low"]);
+    assert_eq!(again.code, 8);
+    assert_eq!(corp.queries_to("/api/now/stats/incident").await.len(), 1);
+    assert!(corp.mutating_requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_value_not_in_the_in_use_set_is_not_seen_and_blocks_the_write() {
+    // CT-10b
+    let pack = support::EXAMPLE_PACK.replace(
+        "choice_fields = { incident = [\"priority\", \"state\"]",
+        "choice_fields = { incident = [\"priority\", \"state\", \"u_tier\"]",
+    );
+    let corp = ExampleCorp::start_with_pack(&pack).await;
+    corp.mount(support::Scenario::InUseRenumbered).await;
+    corp.mount_incident_patch(serde_json::json!({})).await;
+    let out = corp.run(&[
+        "--json",
+        "update",
+        "INC0012345",
+        "--set",
+        "u_tier=gold",
+        "--write",
+    ]);
+    assert_eq!(out.code, 8, "{}", out.stderr);
+    let f = &out.json()["unverifiable_fields"][0];
+    assert_eq!(f["reason"], "not_seen");
+    let candidates = f["candidates"].to_string();
+    assert!(
+        candidates.contains("silver") && candidates.contains("bronze"),
+        "{candidates}"
+    );
+    assert!(corp.patch_bodies().await.is_empty(), "zero PATCH");
+}
+
+/// Every fixture string that `discover` must never persist (NA-8).
+const FIXTURE_SECRETS: &[&str] = &[
+    "11111111111111111111111111111111",
+    "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+    "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+    "33333333333333333333333333333333",
+    "44444444444444444444444444444444",
+    "55555555555555555555555555555555",
+    "pat.example",
+    "Pat Example",
+    "Network - L2",
+    "Storage - L2",
+    "Ops, EMEA",
+    "Database - L3",
+    "VPN drops",
+    "Badge access",
+];
+
+fn assert_no_fixture_secrets(label: &str, text: &str) {
+    for s in FIXTURE_SECRETS {
+        assert!(!text.contains(s), "{label} leaks {s:?}:\n{text}");
+    }
+}
+
+#[tokio::test]
+async fn discover_writes_a_private_draft_with_metadata_only() {
+    // CT-35, CT-30a (DISC-4, DISC-5; NA-1, NA-8)
+    let pack = support::EXAMPLE_PACK.replace(
+        "choice_fields = { incident = [\"priority\", \"state\"]",
+        "choice_fields = { incident = [\"priority\", \"state\", \"assigned_to\"]",
+    );
+    let corp = ExampleCorp::start_with_pack(&pack).await;
+    corp.mount(support::Scenario::InUseRenumbered).await;
+    corp.mount(support::Scenario::TaskSample).await;
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let draft_path = out_dir.path().join("draft.pack.toml");
+    let draft_arg = draft_path.to_str().expect("utf-8 path");
+
+    let run = corp.run(&["discover", "--out", draft_arg]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(run.stdout.contains("Wrote draft pack:"), "{}", run.stdout);
+    assert!(run.stdout.contains("Next: 1)"), "{}", run.stdout);
+
+    let draft = std::fs::read_to_string(&draft_path).expect("draft");
+    assert!(
+        draft.starts_with("# Contains instance metadata. Do not commit to a public repository.")
+    );
+    assert!(draft.contains("status = \"draft\""), "{draft}");
+    assert!(draft.contains("ABC = \"u_abc_request\""), "{draft}");
+    assert!(
+        draft.contains("3 of the 5 most recent task rows use prefix ABC"),
+        "{draft}"
+    );
+    assert!(draft.contains("[choices.incident.priority]"), "{draft}");
+    for v in 0..=5 {
+        assert!(
+            draft.contains(&format!("{{ value = \"{v}\"")),
+            "priority {v}: {draft}"
+        );
+    }
+    assert!(draft.contains("# in-use values only (6 seen)"), "{draft}");
+    assert!(
+        draft.contains("suffixes = [\" - L2\", \" - L3\"]"),
+        "{draft}"
+    );
+    assert!(draft.contains("# skipped: incident.assigned_to"), "{draft}");
+    assert!(
+        draft.contains("# custom field: u_abc_request.u_tier (choice-typed)"),
+        "{draft}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&draft_path)
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    assert_no_fixture_secrets("draft", &draft);
+    assert_no_fixture_secrets(
+        "capabilities.json",
+        &std::fs::read_to_string(corp.cache_file("capabilities.json")).expect("caps"),
+    );
+    for entry in std::fs::read_dir(corp.cache_file("schemas")).expect("schemas dir") {
+        let p = entry.expect("entry").path();
+        assert_no_fixture_secrets(
+            &p.display().to_string(),
+            &std::fs::read_to_string(&p).expect("schema"),
+        );
+    }
+
+    let validated = corp.run(&["pack", "validate", draft_arg]);
+    assert_eq!(
+        validated.code, 0,
+        "{}{}",
+        validated.stdout, validated.stderr
+    );
+
+    let again = corp.run(&["discover", "--out", draft_arg]);
+    assert_eq!(again.code, 2, "refuses to overwrite: {}", again.stderr);
+    let forced = corp.run(&["discover", "--out", draft_arg, "--force"]);
+    assert_eq!(forced.code, 0, "{}", forced.stderr);
+
+    assert!(
+        corp.mutating_requests().await.is_empty(),
+        "discover is read-only (NA-1)"
+    );
+}
+
+#[tokio::test]
+async fn discover_without_samples_reads_no_record_rows() {
+    // CT-35 (--no-samples, BF-TEST-2f)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::InUseRenumbered).await;
+    corp.mount(support::Scenario::TaskSample).await;
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let draft_path = out_dir.path().join("draft.pack.toml");
+    let run = corp.run(&[
+        "discover",
+        "--no-samples",
+        "--out",
+        draft_path.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let draft = std::fs::read_to_string(&draft_path).expect("draft");
+    assert!(
+        draft.contains("# prefixes: none discovered (sys_number unreadable, --no-samples set)"),
+        "{draft}"
+    );
+    assert!(
+        draft.contains("[choices.incident.priority]"),
+        "choice labels are metadata: {draft}"
+    );
+    for p in [
+        "/api/now/table/task",
+        "/api/now/table/sys_user_group",
+        "/api/now/table/incident",
+    ] {
+        assert!(corp.queries_to(p).await.is_empty(), "{p} was read");
+    }
+    assert!(corp.mutating_requests().await.is_empty());
+}

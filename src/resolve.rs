@@ -74,28 +74,12 @@ pub fn effective_prefixes(
     map
 }
 
-/// Loads [`CachedPrefixes`] from `prefixes.json` if fresh, or syncs from `sys_number` (falling back
-/// to the pack's prefixes on `403 Forbidden`). Returns the effective map; learned prefixes survive
-/// a resync.
-pub async fn load_or_sync_prefixes(
+/// Reads `sys_number` (prefix -> table, instance metadata) and records `number_table_readable`.
+/// `None` when it is unreadable (403 is common for non-admins).
+pub async fn fetch_sys_number(
     client: &ReadOnlyClient,
     cache: &InstanceCache,
-    force_sync: bool,
-) -> Result<CachedPrefixes, SncfrError> {
-    let pack = crate::pack::active();
-    if !force_sync && let Ok(Some(cached)) = cache.read_prefixes() {
-        return Ok(CachedPrefixes {
-            prefixes: effective_prefixes(&cached.prefixes, &cached.learned, pack),
-            learned: cached.learned,
-        });
-    }
-    let learned = cache
-        .read_allow_stale::<CachedPrefixes>(std::path::Path::new("prefixes.json"))
-        .ok()
-        .flatten()
-        .map(|(p, _)| p.learned)
-        .unwrap_or_default();
-
+) -> Result<Option<BTreeMap<String, String>>, SncfrError> {
     let mut sys_number = BTreeMap::new();
     let query = [
         ("sysparm_fields", "prefix,category"),
@@ -103,10 +87,10 @@ pub async fn load_or_sync_prefixes(
         ("sysparm_display_value", "false"),
     ];
     use crate::capabilities::{CapHint, CapSource, CapState, Capability, CapabilityRecord};
-    match client
+    let result = client
         .get_json::<Value>("/api/now/table/sys_number", &query)
-        .await
-    {
+        .await;
+    match result {
         Ok(resp) => {
             CapabilityRecord::observe(
                 cache,
@@ -130,13 +114,9 @@ pub async fn load_or_sync_prefixes(
                     }
                 }
             }
+            Ok(Some(sys_number))
         }
-        Err(SncfrError::AuthExpired { instance }) => {
-            return Err(SncfrError::AuthExpired { instance });
-        }
-        Err(SncfrError::AuthRequired { profile }) => {
-            return Err(SncfrError::AuthRequired { profile });
-        }
+        Err(e @ (SncfrError::AuthExpired { .. } | SncfrError::AuthRequired { .. })) => Err(e),
         Err(SncfrError::AclForbidden { .. }) => {
             // Common for non-admins: the pack's prefixes and the task fallback still work.
             CapabilityRecord::observe(
@@ -147,9 +127,35 @@ pub async fn load_or_sync_prefixes(
                 Some(403),
                 Some(CapHint::Acl),
             );
+            Ok(None)
         }
-        Err(_) => {}
+        Err(_) => Ok(None),
     }
+}
+
+/// Loads [`CachedPrefixes`] from `prefixes.json` if fresh, or syncs from `sys_number` (falling back
+/// to the pack's prefixes on `403 Forbidden`). Returns the effective map; learned prefixes survive
+/// a resync.
+pub async fn load_or_sync_prefixes(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    force_sync: bool,
+) -> Result<CachedPrefixes, SncfrError> {
+    let pack = crate::pack::active();
+    if !force_sync && let Ok(Some(cached)) = cache.read_prefixes() {
+        return Ok(CachedPrefixes {
+            prefixes: effective_prefixes(&cached.prefixes, &cached.learned, pack),
+            learned: cached.learned,
+        });
+    }
+    let learned = cache
+        .read_allow_stale::<CachedPrefixes>(std::path::Path::new("prefixes.json"))
+        .ok()
+        .flatten()
+        .map(|(p, _)| p.learned)
+        .unwrap_or_default();
+
+    let sys_number = fetch_sys_number(client, cache).await?.unwrap_or_default();
 
     // On disk: what sys_number returned plus learned prefixes (kept separately so a resync
     // keeps them).
