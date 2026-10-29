@@ -1,19 +1,21 @@
 use crate::auth::resolve_current_identity;
 use crate::cache::{CachedIdentity, InstanceCache};
-use crate::cli::{ApprovalActionArgs, ApprovalListArgs, CatalogOrderArgs};
+pub use crate::catalog::{
+    CatalogItemDetail, CatalogItemSummary, CatalogVariableSpec, execute_catalog_order,
+    execute_catalog_search, execute_catalog_show, format_catalog_detail, format_catalog_search,
+};
+use crate::cli::{ApprovalActionArgs, ApprovalListArgs};
 use crate::client::write_gate::{ResolvedField, Target, VerifiedMutation};
 use crate::client::{ReadOnlyClient, WritePermit, extract_field_display, extract_field_value};
 use crate::error::SncfrError;
-use crate::mutate::{
-    FieldDiff, MutationReport, parse_key_value_pair, resolve_user_reference, run_gate, shell_quote,
-};
+use crate::mutate::{FieldDiff, MutationReport, run_gate, shell_quote};
 use crate::output::{ResolvedOutputFormat, styled_table_cell};
 use crate::query::{DYNAMIC_ME_SYS_ID, EncodedQuery};
 use crate::resolve::{is_sys_id, resolve_ticket};
 use crate::resolve_value::ResolvedValue;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalItem {
@@ -84,38 +86,6 @@ pub struct ApprovalsEnvelope {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     pub items: Vec<ApprovalItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogItemSummary {
-    pub sys_id: String,
-    pub name: String,
-    pub short_description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogVariableSpec {
-    pub name: String,
-    pub label: String,
-    pub field_type: String,
-    pub mandatory: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_value: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub choices: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogItemDetail {
-    pub sys_id: String,
-    pub name: String,
-    pub short_description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub variables: Vec<CatalogVariableSpec>,
 }
 
 /// Executes `sncfr approvals list`.
@@ -410,274 +380,6 @@ fn parse_approval_rows(resp: &Value) -> Vec<ApprovalItem> {
     items
 }
 
-/// Executes `sncfr catalog search <query> [--limit <n>]`.
-pub async fn execute_catalog_search(
-    client: &ReadOnlyClient,
-    query: &str,
-    limit: u32,
-) -> Result<Vec<CatalogItemSummary>, SncfrError> {
-    let limit_str = limit.to_string();
-    let mut items = Vec::new();
-
-    if let Ok(resp) = client
-        .get_json::<Value>(
-            "/api/sn_sc/servicecatalog/items",
-            &[
-                ("sysparm_text", query),
-                ("sysparm_limit", limit_str.as_str()),
-            ],
-        )
-        .await
-        && let Some(rows) = resp.get("result").and_then(Value::as_array)
-    {
-        for row in rows {
-            if let (Some(sys_id), Some(name)) = (
-                extract_field_value(row, "sys_id"),
-                extract_field_display(row, "name"),
-            ) {
-                items.push(CatalogItemSummary {
-                    sys_id,
-                    name,
-                    short_description: extract_field_display(row, "short_description")
-                        .unwrap_or_default(),
-                    category: extract_field_display(row, "category"),
-                });
-            }
-        }
-        return Ok(items);
-    }
-
-    // Fallback to `sc_cat_item` table query if Service Catalog REST API returns 403/404
-    let q = format!("active=true^nameLIKE{query}^ORshort_descriptionLIKE{query}");
-    let resp: Value = client
-        .get_json(
-            "/api/now/table/sc_cat_item",
-            &[
-                ("sysparm_query", q.as_str()),
-                ("sysparm_limit", limit_str.as_str()),
-                ("sysparm_display_value", "all"),
-                ("sysparm_fields", "sys_id,name,short_description,category"),
-            ],
-        )
-        .await?;
-
-    if let Some(rows) = resp.get("result").and_then(Value::as_array) {
-        for row in rows {
-            if let (Some(sys_id), Some(name)) = (
-                extract_field_value(row, "sys_id"),
-                extract_field_display(row, "name"),
-            ) {
-                items.push(CatalogItemSummary {
-                    sys_id,
-                    name,
-                    short_description: extract_field_display(row, "short_description")
-                        .unwrap_or_default(),
-                    category: extract_field_display(row, "category"),
-                });
-            }
-        }
-    }
-    Ok(items)
-}
-
-/// Executes `sncfr catalog show <item_sys_id_or_name>`.
-pub async fn execute_catalog_show(
-    client: &ReadOnlyClient,
-    item: &str,
-) -> Result<CatalogItemDetail, SncfrError> {
-    let trimmed = item.trim();
-    let item_sys_id = if is_sys_id(trimmed) {
-        trimmed.to_string()
-    } else {
-        let found = execute_catalog_search(client, trimmed, 5).await?;
-        found
-            .into_iter()
-            .find(|i| i.name.eq_ignore_ascii_case(trimmed))
-            .map(|i| i.sys_id)
-            .ok_or_else(|| SncfrError::NotFound {
-                identifier: trimmed.to_string(),
-                table: Some("sc_cat_item".to_string()),
-            })?
-    };
-
-    let path = format!("/api/sn_sc/servicecatalog/items/{item_sys_id}");
-    let resp: Value = client.get_json(&path, &[]).await?;
-    let res = resp.get("result").unwrap_or(&resp);
-
-    let name = extract_field_display(res, "name").unwrap_or_else(|| item_sys_id.clone());
-    let short_description = extract_field_display(res, "short_description").unwrap_or_default();
-    let description = extract_field_display(res, "description");
-
-    let mut variables = Vec::new();
-    if let Some(vars) = res.get("variables").and_then(Value::as_array) {
-        for v in vars {
-            let Some(var_name) = v.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let label = v
-                .get("label")
-                .and_then(Value::as_str)
-                .unwrap_or(var_name)
-                .to_string();
-            let field_type = v
-                .get("friendly_type")
-                .or_else(|| v.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("string")
-                .to_string();
-            let mandatory = v.get("mandatory").and_then(Value::as_bool).unwrap_or(false);
-            let default_value = v
-                .get("value")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-
-            let mut choices = Vec::new();
-            if let Some(ch_arr) = v.get("choices").and_then(Value::as_array) {
-                for ch in ch_arr {
-                    let lbl = ch.get("label").and_then(Value::as_str).unwrap_or_default();
-                    let val = ch.get("value").and_then(Value::as_str).unwrap_or_default();
-                    if !val.is_empty() {
-                        choices.push(format!("{lbl} ({val})"));
-                    }
-                }
-            }
-
-            variables.push(CatalogVariableSpec {
-                name: var_name.to_string(),
-                label,
-                field_type,
-                mandatory,
-                default_value,
-                choices,
-            });
-        }
-    }
-
-    Ok(CatalogItemDetail {
-        sys_id: item_sys_id,
-        name,
-        short_description,
-        description,
-        variables,
-    })
-}
-
-/// Executes `sncfr catalog order <item_sys_id> [--var k=v...] [--write]`.
-pub async fn execute_catalog_order(
-    client: ReadOnlyClient,
-    cache: &InstanceCache,
-    args: &CatalogOrderArgs,
-    permit: Option<WritePermit>,
-) -> Result<MutationReport, SncfrError> {
-    let detail = execute_catalog_show(&client, &args.item_sys_id).await?;
-    let mut variables: Vec<ResolvedField> = Vec::new();
-    let mut diffs = Vec::new();
-
-    // Variable values are checked against the item's metadata in CAT-4; until then they are sent
-    // as typed.
-    for kv in &args.variables {
-        let (k, v) = parse_key_value_pair(kv)?;
-        diffs.push(FieldDiff {
-            field: format!("var:{k}"),
-            before_display: None,
-            before_value: None,
-            after_display: v.clone(),
-            after_value: v.clone(),
-            source: Some("input".to_string()),
-            status: Some("n/a (free text)".to_string()),
-            ..Default::default()
-        });
-        let value = ResolvedValue::text(&v);
-        variables.push((k, v, value));
-    }
-
-    // Validate mandatory variables
-    for var_spec in &detail.variables {
-        if var_spec.mandatory
-            && !variables.iter().any(|(name, _, _)| name == &var_spec.name)
-            && var_spec.default_value.is_none()
-        {
-            return Err(SncfrError::Validation {
-                message: format!(
-                    "Missing mandatory catalog variable '{}' ({}) for item '{}'",
-                    var_spec.name, var_spec.label, detail.name
-                ),
-                valid_choices: var_spec.choices.clone(),
-                remediation: Some(format!(
-                    "Pass `--var {}=<value>` (run `sncfr catalog show {}` to inspect variables).",
-                    var_spec.name, detail.sys_id
-                )),
-            });
-        }
-    }
-
-    let mut order_payload = json!({
-        "sysparm_quantity": args.quantity.to_string(),
-    });
-
-    if let Some(req_for) = &args.requested_for {
-        let (disp, user_sys_id, ref_source) =
-            resolve_user_reference(&client, cache, req_for).await?;
-        diffs.push(FieldDiff {
-            field: "requested_for".to_string(),
-            before_display: None,
-            before_value: None,
-            after_display: disp,
-            after_value: user_sys_id.clone(),
-            source: Some(ref_source),
-            status: Some("verified".to_string()),
-            ..Default::default()
-        });
-        order_payload["sysparm_requested_for"] = Value::String(user_sys_id);
-    }
-
-    let mut cmd_parts = vec![
-        "sncfr".to_string(),
-        "catalog".to_string(),
-        "order".to_string(),
-        shell_quote(&detail.sys_id),
-    ];
-    for kv in &args.variables {
-        cmd_parts.push("--var".to_string());
-        cmd_parts.push(shell_quote(kv));
-    }
-    if args.quantity != 1 {
-        cmd_parts.push("--quantity".to_string());
-        cmd_parts.push(args.quantity.to_string());
-    }
-    if let Some(req_for) = &args.requested_for {
-        cmd_parts.push("--requested-for".to_string());
-        cmd_parts.push(shell_quote(req_for));
-    }
-    cmd_parts.push("--write".to_string());
-
-    let mutation = VerifiedMutation::catalog_order(
-        Target::catalog_order(&detail.sys_id)?,
-        order_payload,
-        &variables,
-    );
-    let gate = run_gate(client, permit, vec![mutation]).await?;
-    let mut report = MutationReport {
-        operation: "catalog_order".to_string(),
-        ticket: Some(detail.name.clone()),
-        table: "sc_cat_item".to_string(),
-        sys_id: Some(detail.sys_id.clone()),
-        diffs,
-        commit_command: Some(cmd_parts.join(" ")),
-        ..Default::default()
-    };
-    if let Some(res) = gate.first_record() {
-        report.ticket = extract_field_display(res, "request_number")
-            .or_else(|| extract_field_display(res, "number"));
-        report.table = "sc_request".to_string();
-        report.sys_id =
-            extract_field_value(res, "request_id").or_else(|| extract_field_value(res, "sys_id"));
-    }
-    gate.fill(&mut report);
-    Ok(report)
-}
-
 pub fn format_approvals(env: &ApprovalsEnvelope, format: ResolvedOutputFormat) -> String {
     match format {
         ResolvedOutputFormat::Json => serde_json::to_string_pretty(env).unwrap_or_default(),
@@ -746,77 +448,13 @@ pub fn format_approvals(env: &ApprovalsEnvelope, format: ResolvedOutputFormat) -
     }
 }
 
-pub fn format_catalog_search(items: &[CatalogItemSummary], format: ResolvedOutputFormat) -> String {
-    match format {
-        ResolvedOutputFormat::Json => serde_json::to_string_pretty(items).unwrap_or_default(),
-        ResolvedOutputFormat::Yaml => serde_yaml::to_string(items).unwrap_or_default(),
-        ResolvedOutputFormat::Md => {
-            let mut out = format!("# Service Catalog Items ({})\n\n", items.len());
-            for item in items {
-                out.push_str(&format!(
-                    "- **{}** (`sys_id={}`): {}\n",
-                    item.name, item.sys_id, item.short_description
-                ));
-            }
-            out
-        }
-        ResolvedOutputFormat::Table | ResolvedOutputFormat::TerminalDossier => {
-            if items.is_empty() {
-                return "No matching Service Catalog items found.".to_string();
-            }
-            let mut table = Table::new();
-            let width = table.width().unwrap_or(120).max(120);
-            table
-                .load_preset(UTF8_FULL_CONDENSED)
-                .set_content_arrangement(ContentArrangement::Dynamic)
-                .set_width(width)
-                .set_header(vec!["SYS_ID", "NAME", "CATEGORY", "SHORT_DESCRIPTION"]);
-            for item in items {
-                table.add_row(vec![
-                    item.sys_id.as_str(),
-                    item.name.as_str(),
-                    item.category.as_deref().unwrap_or(""),
-                    item.short_description.as_str(),
-                ]);
-            }
-            table.to_string()
-        }
-    }
-}
-
-pub fn format_catalog_detail(detail: &CatalogItemDetail, format: ResolvedOutputFormat) -> String {
-    match format {
-        ResolvedOutputFormat::Json => serde_json::to_string_pretty(detail).unwrap_or_default(),
-        ResolvedOutputFormat::Yaml => serde_yaml::to_string(detail).unwrap_or_default(),
-        _ => {
-            let mut out = format!(
-                "# {} (`sys_id={}`)\n\n{}\n\n## Variables\n\n",
-                detail.name, detail.sys_id, detail.short_description
-            );
-            for v in &detail.variables {
-                out.push_str(&format!(
-                    "- **`{}`** ({}, type: `{}`, mandatory: `{}`){}\n",
-                    v.name,
-                    v.label,
-                    v.field_type,
-                    v.mandatory,
-                    if v.choices.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" — choices: {}", v.choices.join(", "))
-                    }
-                ));
-            }
-            out
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::CatalogOrderArgs;
     use crate::client::ClientAuth;
     use clap::Parser;
+    use serde_json::json;
     use tempfile::tempdir;
     use url::Url;
     use wiremock::matchers::{method, path};

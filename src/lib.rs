@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod cache;
 pub mod capabilities;
+pub mod catalog;
 pub mod cli;
 pub mod client;
 pub mod config;

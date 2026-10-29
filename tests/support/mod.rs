@@ -107,6 +107,9 @@ pub enum Scenario {
     /// `sysapproval_approver` answers the `approver=<me>` query with two rows and the
     /// `group.assignment_groupIN…` query with two rows, one of them shared (`approvals.json`).
     LinkedApprovals,
+    /// `/api/sn_sc/*` answers 401 (the role lacks the catalog API) while the Table API answers:
+    /// `sc_cat_item`, `item_option_new`, and `question_choice` from `catalog.json`.
+    CatalogUnauthorized,
     /// `task` answers with recent rows (`number`, `sys_class_name`): three `ABC-` rows on
     /// `u_abc_request`, two `INC` rows (`task_sample.json`).
     TaskSample,
@@ -348,6 +351,32 @@ impl ExampleCorp {
                     .and(path("/api/now/table/sysapproval_approver"))
                     .respond_with(LinkedApprovals(fixture("approvals.json")))
                     .mount(&self.server)
+                    .await;
+            }
+            Scenario::CatalogUnauthorized => {
+                let cat = fixture("catalog.json");
+                Mock::given(wiremock::matchers::path_regex("^/api/sn_sc/"))
+                    .respond_with(
+                        ResponseTemplate::new(401).set_body_json(
+                            json!({ "error": { "message": "User Not Authenticated" } }),
+                        ),
+                    )
+                    .mount(&self.server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path(
+                        "/api/now/table/sc_cat_item/c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+                    ))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(json!({ "result": cat["item"] })),
+                    )
+                    .mount(&self.server)
+                    .await;
+                self.get("sc_cat_item", json!({ "result": [cat["item"]] }))
+                    .await;
+                self.get("item_option_new", json!({ "result": cat["variables"] }))
+                    .await;
+                self.get("question_choice", json!({ "result": cat["choices"] }))
                     .await;
             }
             Scenario::TaskSample => {
