@@ -320,14 +320,18 @@ pub async fn execute_approval_action(
             None,
         ),
     )];
-    if let Some(comments) = &args.comments {
+    if let Some(typed) = &args.comments {
+        // SAFE-8: approval comments carry the agent marker too. There is no `--allow-code-tag`
+        // on approvals, so `[code]` is refused here.
+        let (comments, source) = crate::mutate::marked_journal(typed, false)?;
+        let comments = &comments;
         diffs.push(FieldDiff {
             field: "comments".to_string(),
             before_display: target.comments.clone(),
             before_value: target.comments.clone(),
             after_display: comments.clone(),
             after_value: comments.clone(),
-            source: Some("input".to_string()),
+            source: Some(source.to_string()),
             status: Some("n/a (free text)".to_string()),
             ..Default::default()
         });

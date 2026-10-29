@@ -458,6 +458,10 @@ pub struct CommentArgs {
     /// Execute the mutation against ServiceNow (without this flag, runs a Validated Dry-Run Preview)
     #[arg(short, long)]
     pub write: bool,
+
+    /// Permit `[code]` in the body (rendered as HTML by ServiceNow); a warning is still printed
+    #[arg(long)]
+    pub allow_code_tag: bool,
 }
 
 pub type NoteArgs = CommentArgs;
@@ -522,6 +526,10 @@ pub struct UpdateArgs {
     /// Execute the mutation against ServiceNow (without this flag, runs a Validated Dry-Run Preview)
     #[arg(short, long)]
     pub write: bool,
+
+    /// Permit `[code]` in `--note` / `--comment` (rendered as HTML by ServiceNow)
+    #[arg(long)]
+    pub allow_code_tag: bool,
 }
 
 #[derive(Debug, Clone, Args)]
