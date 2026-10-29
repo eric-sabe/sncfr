@@ -943,3 +943,109 @@ async fn discover_without_samples_reads_no_record_rows() {
     }
     assert!(corp.mutating_requests().await.is_empty());
 }
+
+#[tokio::test]
+async fn approvals_list_includes_group_linked_rows_once() {
+    // CT-37 (APR-1, APR-2, BF-TEST-2e)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::LinkedApprovals).await;
+    let out = corp.run(&["--json", "approvals", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let env = out.json();
+    let items = env["items"].as_array().expect("items");
+    let linked: Vec<(String, String)> = items
+        .iter()
+        .map(|i| {
+            (
+                i["sys_id"].as_str().unwrap_or_default().to_string(),
+                i["linked_by"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        linked,
+        vec![
+            (
+                "aa000000000000000000000000000003".to_string(),
+                "group".to_string()
+            ),
+            (
+                "aa000000000000000000000000000002".to_string(),
+                "both".to_string()
+            ),
+            (
+                "aa000000000000000000000000000001".to_string(),
+                "user".to_string()
+            ),
+        ],
+        "newest first, each row once"
+    );
+    assert_eq!(items[0]["group"], "Network - L2 approvers");
+    let queries = corp.queries_to("/api/now/table/sysapproval_approver").await;
+    assert_eq!(queries.len(), 2, "{queries:?}");
+    assert!(
+        queries
+            .iter()
+            .all(|q| q.contains("ORDERBYDESCsys_created_on")),
+        "{queries:?}"
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|q| q.contains("group.assignment_groupIN33333333333333333333333333333333")),
+        "{queries:?}"
+    );
+
+    let all = corp.run(&[
+        "--json",
+        "approvals",
+        "list",
+        "--all-users",
+        "--state",
+        "approved",
+    ]);
+    assert_eq!(all.code, 0, "{}", all.stderr);
+    let q = all.json()["query"].as_str().unwrap_or_default().to_string();
+    assert!(
+        q.contains("state=approved") && !q.contains("approver="),
+        "{q}"
+    );
+    assert!(all.json()["group_query"].is_null());
+}
+
+#[tokio::test]
+async fn agent_comments_and_notes_carry_the_pack_marker() {
+    // CT-38 (SAFE-8, NA-12): the harness runs with --no-interactive and a non-TTY stdin.
+    let corp = ExampleCorp::start().await;
+    let note = corp.run(&["--json", "note", "INC0012345", "Rebooted the VPN gateway"]);
+    assert_eq!(note.code, 0, "{}", note.stderr);
+    let diff = &note.json()["diffs"][0];
+    assert_eq!(
+        diff["after_value"],
+        "[sncfr-agent] Rebooted the VPN gateway"
+    );
+    assert_eq!(diff["source"], "input + marker");
+
+    let update = corp.run(&["--json", "update", "INC0012345", "--comment", "Fixed"]);
+    assert_eq!(update.code, 0, "{}", update.stderr);
+    assert_eq!(
+        update.json()["diffs"][0]["after_value"],
+        "[sncfr-agent] Fixed"
+    );
+
+    let code = corp.run(&["note", "INC0012345", "[code]<b>x</b>[/code]"]);
+    assert_eq!(code.code, 2, "{}", code.stderr);
+    let allowed = corp.run(&[
+        "note",
+        "INC0012345",
+        "[code]<b>x</b>[/code]",
+        "--allow-code-tag",
+    ]);
+    assert_eq!(allowed.code, 0, "{}", allowed.stderr);
+    assert!(
+        allowed.stderr.contains("[code]"),
+        "warned: {}",
+        allowed.stderr
+    );
+    assert!(corp.mutating_requests().await.is_empty());
+}

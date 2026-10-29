@@ -81,7 +81,7 @@ When a mutating command (`comment`, `note`, `update`, `create`, `attach`, `appro
 3. Outputs a structured **Dry-Run Preview**:
    - Target ticket number, table, `sys_id`, and URL.
    - Before $\to$ After field diff (showing both human display values and underlying internal values).
-   - For every field, a **Source** (`pack`, `ootb`, `cache`, `sys_choice`, `discovered`, `input`, or `none`) and a **Status** (`verified`, `verified (in-use set)`, `UNVERIFIABLE (<reason>)`, or `n/a (free text)`). JSON carries the same as `diffs[].source` / `diffs[].status`, plus `diffs[].unverifiable` (`would_send`, `reason`, `candidates`, `suggested`).
+   - For every field, a **Source** (`pack`, `ootb`, `cache`, `sys_choice`, `discovered`, `input`, `input + marker`, or `none`) and a **Status** (`verified`, `verified (in-use set)`, `UNVERIFIABLE (<reason>)`, or `n/a (free text)`). JSON carries the same as `diffs[].source` / `diffs[].status`, plus `diffs[].unverifiable` (`would_send`, `reason`, `candidates`, `suggested`).
    - Exact command with `--write` to commit the change.
 4. Exits cleanly without mutating the instance (exit `0`), or exits `8` (`UNVERIFIABLE`) when any value could not be confirmed. Dry-run and `--write` run the same check: every mutation of an invocation is checked before the first request is sent, so `--write` with an unverifiable value sends nothing.
 5. **Write path**: mutations are built only from resolved values and sent only through the write gate (`src/write_gate.rs`; ADR-0002 amendment). After each record write, the returned record is compared with what was sent (exit `9` on a mismatch).
@@ -125,12 +125,13 @@ Commands that accept a `<TICKET>` identifier accept any ticket number, with one 
 
 - **`sncfr show <TICKET>... [flags]`** (alias: `view`, `get`)
   - Assembles a complete **Ticket Dossier** from concurrent Table API `GET`s, using a single `/api/now/batch` request as an optimization when the capability record (§7.2) says batch works on this instance. A batch 400 "URI does not represent any resource" or 404 is remembered as `unavailable`, a 403 as `unauthorized`, and later runs skip it. Each section below degrades on its own (`restricted` 403, `unavailable` 404/invalid table, `timed_out`, or `error`): JSON carries `sections.<name>.status` and `degraded[]`, Markdown shows a `⚠ Partial dossier: …` line, and the command still exits 0. Only failing to fetch the ticket itself fails the command:
-    1. **Core & Custom Fields**: Curated core fields (`number`, `state`, `priority`, `urgency`, `impact`, `short_description`, `description`, `opened_by`, `caller_id`/`requested_for`, `assignment_group`, `assigned_to`, `sys_created_on`, `sys_updated_on`, `close_code`, `close_notes`, etc.) **plus all non-empty custom fields (`u_*`, `x_*`)** with `sysparm_display_value=all`.
-    2. **Catalog Variables (for `sc_req_item` / `sc_task`)**: Queries `sc_item_option_mtom` $\to$ `sc_item_option` to render the question/answer pairs submitted on the Service Catalog form.
+    1. **Core & Custom Fields**: Curated core fields (`number`, `state`, `priority`, `urgency`, `impact`, `short_description`, `description`, `opened_by`, `caller_id`/`requested_for`, `assignment_group`, `assigned_to`, `sys_created_on`, `sys_updated_on`, `close_code`, `close_notes`, etc.) **plus all non-empty custom fields (`u_*`, `x_*`)** with `sysparm_display_value=all`. Defaults are table-aware (DOS-2): task-derived tables (per the pack `[hierarchy]`, or, for a table the pack does not list, a record carrying `number` and `opened_at`) get the curated core fields plus the pack's `fields.default.<table>.dossier` (nearest along the hierarchy). Other tables (e.g. `cmdb_ci_server`) get that pack list, else `sys_id`, `name`, `sys_class_name`, `sys_updated_on`, never the task core fields. Without `--fields`/`--all-fields`, empty custom fields are omitted unless the pack lists them.
+    2. **Catalog Variables (for `sc_req_item` / `sc_task`)**: Queries `sc_item_option_mtom` $\to$ `sc_item_option` to render the question/answer pairs submitted on the Service Catalog form. Reference (type 8) and List Collector (type 21) answers show the referenced record's display value (DOS-1): ids are grouped per table into `sys_idIN` lookups of at most 100, only 32-hex ids are looked up (NA-13), and the display field is the dictionary's `display = true` field, else the first non-empty of `name`, `number`, `short_description`, `user_name`, `title`. Lookups are remembered for the rest of the invocation. An answer that cannot be resolved is shown raw with `(unresolved reference to <table>)`. JSON gains `raw_value` and `unresolved_reference` on those variables. Markdown and terminal output sanitize every instance-sourced string (NA-9): one-line values have control and format characters removed and line breaks shown as `⏎`. In Markdown, description, close notes, and journal bodies are fenced, so they cannot create headings or lists.
     3. **Chronological Activity Stream (`comments` & `work_notes`)**: Queries `sys_journal_field` (`nameIN<table>,task^element_id=<sys_id>^ORDERBYsys_created_on`; the `name` term keeps the query on its index, PERF-3) to render customer-visible comments and internal work notes in chronological order. If `sys_journal_field` returns `403 Forbidden`, gracefully falls back to parsing inline `comments_and_work_notes` / `comments` display values.
     4. **Related Hierarchy & Approvals**: Parent ticket (`parent`, `request`), child tasks (`task.parent=<sys_id>`), approvals (`sysapproval_approver.sysapproval=<sys_id>`), and impacted CIs (`task_ci`).
     5. **Attachments**: Lists attachment metadata (`sys_attachment.table_sys_id=<sys_id>`: file name, size, content type, uploader, timestamp, and `sys_id`).
 - **`sncfr list [@<saved-view>] [flags]`** (alias: `ls`)
+  - Default columns (no `--fields` and no saved-view fields): the pack's `fields.default.<table>.list`, nearest along the hierarchy, else the pack's `core.list_columns` for ticket tables (DOS-2).
   - High-level ergonomic filters:
     - `--table <table|prefix>` (defaults to `task` or the saved view's table)
     - `--mine` (`assigned_to=@me` or `caller_id=@me` / `opened_by=@me` / `requested_for=@me`)
@@ -159,12 +160,13 @@ Commands that accept a `<TICKET>` identifier accept any ticket number, with one 
 
 ### 5.3 Top-Level Ticket Mutation Commands (Dry-Run by Default, `--write` to Commit)
 
-- **`sncfr comment <TICKET> <MESSAGE> [--file <path>] [--write]`**
+- **`sncfr comment <TICKET> <MESSAGE> [--file <path>] [--allow-code-tag] [--write]`**
   - Posts a customer-visible comment (`comments` field).
-- **`sncfr note <TICKET> <MESSAGE> [--file <path>] [--write]`**
+- **`sncfr note <TICKET> <MESSAGE> [--file <path>] [--allow-code-tag] [--write]`**
   - Posts an internal fulfiller work note (`work_notes` field).
+- **Agent write marker (SAFE-8, NA-12)**: when a loaded pack sets `audit.agent_write_marker` and the invocation is non-interactive (`--no-interactive`, `SNCFR_AGENT=1`, a non-TTY **stdin**, or profile `agent_marker = "always"`; piping stdout alone does not count), every `comments` / `work_notes` payload (`comment`, `note`, `update --comment/--note`, approval comments) begins with `"<marker> "`. The preview shows the marked text with Source `input + marker`. No flag removes it. The marker records provenance; it is not authentication. A body containing `[code]` (which ServiceNow renders as raw HTML) is exit `2` unless `--allow-code-tag` is given (comment, note, update), and even then a warning is printed. Approval comments have no such flag, so `[code]` there is always refused.
 - **`sncfr update <TICKET> [flags] [--write]`**
-  - Ergonomic flags: `--state <val>`, `--priority <val>`, `--urgency <val>`, `--impact <val>`, `--assign-to <user|@me|none>`, `--group <group>`, `--short-description <text>`, `--close-code <val>`, `--close-notes <text>`, `--note <work_note>`, `--comment <comment>`, `--set <field=value>...`.
+  - Ergonomic flags: `--state <val>`, `--priority <val>`, `--urgency <val>`, `--impact <val>`, `--assign-to <user|@me|none>`, `--group <group>`, `--short-description <text>`, `--close-code <val>`, `--close-notes <text>`, `--note <work_note>`, `--comment <comment>`, `--set <field=value>...`, `--allow-code-tag`.
   - Validates choice values and user/group references before previewing or writing.
   - **References never guess (SAFE-7)**: `--group` tries an exact match in `@my-groups`, then an exact `sys_user_group` name, then the pack's `groups.suffixes` (e.g. `Storage` → `Storage - L2`). Users match one `user_name`/`email`/`name`. More than one candidate at any step exits `2` `AMBIGUOUS_REFERENCE`, listing candidates (★ marks your own groups) and any pack `suggest_map` suggestion, which is never applied. The preview's Source shows how each reference resolved (`group:exact`, `group:suffix " - L2"`, `group:my_groups`, `user:@me`, ...).
 - **`sncfr create <table|prefix> [flags] [--write]`**
@@ -176,6 +178,7 @@ Commands that accept a `<TICKET>` identifier accept any ticket number, with one 
 
 - **`sncfr auth <login|status|import|logout|profiles>`** — Manage authentication and instance profiles.
 - **`sncfr approvals <list|show|approve|reject>`** — Inspect pending approvals (`sysapproval_approver`) for `@me` and approve/reject (requires `--write`).
+  - `list` (APR-1..3) sends two queries at once: `approver=<me>` and `group.assignment_groupIN<@my-groups sys_ids>` (both with the `--state` filter, default `requested`, and `ORDERBYDESCsys_created_on`). Rows are deduplicated by `sys_id`, newest first, and each carries `linked_by: user | group | both`. Rows also carry `group`, `document_id`, and `source_table`. `--all-users` drops both linkage predicates and sends one query. A 403 on the group query keeps the user rows and adds a `warnings[]` entry. The envelope gains `group_query`. The dossier's approvals sub-request adds `document_id` and `source_table`.
   - `approve`/`reject` act only on an approval in state `requested` whose `approver` is `@me` or whose `group.assignment_group` is one of `@my-groups`. Given a ticket, exactly one such approval must exist: none → exit `5` listing the approvals found, more than one → exit `2` listing candidates (re-run with the approval `sys_id`). A directly given approval `sys_id` must meet the same rule. Another approver's record or a non-pending record is never a write target.
 - **`sncfr catalog <search|show|order>`** — Browse Service Catalog items (`/api/sn_sc/servicecatalog/items`), inspect variables, and submit catalog requests (requires `--write`).
 - **`sncfr schema <table|prefix> [--choices [field]] [--sync]`** — Inspect table fields, mandatory status, and valid `sys_choice` options; manage local metadata cache.
@@ -247,6 +250,7 @@ auth_method = "sso"
 read_only = false # Set to true to hard-block --write on this profile
 pack = "packs/mycompany.pack.toml" # Optional Instance Pack (§7.3); relative to this file's directory
 pack_locked = false # Set to true to reject --pack / SNCFR_PACK overrides
+agent_marker = "auto" # "always" applies the pack's agent write marker even interactively (SAFE-8)
 
 [profiles.prod.views]
 my-active = { table = "task", query = "assigned_toDYNAMIC90d1921e5f510100a9ad2572f2b477fe^active=true" }

@@ -34,11 +34,14 @@ pub struct ApprovalItem {
     #[serde(skip)]
     pub approver_sys_id: Option<String>,
     /// Display value of the approval `group`, when the approval is group-linked.
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// `group.assignment_group` sys_id, used to match group-linked approvals against `@my-groups`.
     #[serde(skip)]
     pub group_assignment_group: Option<String>,
+    /// How `approvals list` found this row (APR-1): `user`, `group`, or `both`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_by: Option<String>,
 }
 
 impl ApprovalItem {
@@ -75,6 +78,11 @@ impl ApprovalItem {
 pub struct ApprovalsEnvelope {
     pub count: usize,
     pub query: String,
+    /// The group-linked query (APR-1), when one was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_query: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub items: Vec<ApprovalItem>,
 }
 
@@ -116,41 +124,113 @@ pub async fn execute_approvals_list(
     cache: &InstanceCache,
     args: &ApprovalListArgs,
 ) -> Result<ApprovalsEnvelope, SncfrError> {
-    let mut eq = EncodedQuery::new();
-    if !args.state.trim().is_empty() && !args.state.eq_ignore_ascii_case("all") {
-        eq.equals("state", args.state.trim());
-    }
-    if !args.all_users {
-        if let Ok(identity) = resolve_current_identity(client, cache, false).await {
-            eq.equals("approver", &identity.sys_id);
-        } else {
-            eq.dynamic("approver", DYNAMIC_ME_SYS_ID);
+    let base = || {
+        let mut eq = EncodedQuery::new();
+        if !args.state.trim().is_empty() && !args.state.eq_ignore_ascii_case("all") {
+            eq.equals("state", args.state.trim());
         }
+        eq
+    };
+    // `--all-users` drops both linkage predicates (0.1.5 semantics).
+    let identity = if args.all_users {
+        None
+    } else {
+        resolve_current_identity(client, cache, false).await.ok()
+    };
+    let mut user_eq = base();
+    if !args.all_users {
+        match &identity {
+            Some(me) => user_eq.equals("approver", &me.sys_id),
+            None => user_eq.dynamic("approver", DYNAMIC_ME_SYS_ID),
+        };
     }
-    eq.order_by_desc("sys_created_on");
-    let query_str = eq.build();
+    user_eq.order_by_desc("sys_created_on");
+    let user_query = user_eq.build();
 
-    let resp: Value = client
-        .get_json(
-            "/api/now/table/sysapproval_approver",
-            &[
-                ("sysparm_query", query_str.as_str()),
-                ("sysparm_display_value", "all"),
-                (
-                    "sysparm_fields",
-                    "sys_id,state,approver,sysapproval,document_id,source_table,comments,sys_created_on,sys_updated_on",
-                ),
-                ("sysparm_limit", "50"),
-            ],
-        )
-        .await?;
+    // APR-1: approvals routed to one of my assignment groups, queried concurrently.
+    let group_ids: Vec<String> = identity
+        .iter()
+        .flat_map(|me| me.groups.iter().map(|g| g.sys_id.clone()))
+        .filter(|id| is_sys_id(id))
+        .collect();
+    let group_query = (!group_ids.is_empty()).then(|| {
+        let mut eq = base();
+        eq.in_list("group.assignment_group", &group_ids);
+        eq.order_by_desc("sys_created_on");
+        eq.build()
+    });
 
-    let items = parse_approval_rows(&resp);
+    let fetch = |q: String| async move {
+        client
+            .get_json::<Value>(
+                "/api/now/table/sysapproval_approver",
+                &[
+                    ("sysparm_query", q.as_str()),
+                    ("sysparm_display_value", "all"),
+                    (
+                        "sysparm_fields",
+                        "sys_id,state,approver,group,group.assignment_group,sysapproval,document_id,source_table,comments,sys_created_on,sys_updated_on",
+                    ),
+                    ("sysparm_limit", "50"),
+                ],
+            )
+            .await
+    };
+    let (user_resp, group_resp) = tokio::join!(fetch(user_query.clone()), async {
+        match &group_query {
+            Some(q) => Some(fetch(q.clone()).await),
+            None => None,
+        }
+    });
+    let user_items = parse_approval_rows(&user_resp?);
+    let mut warnings = Vec::new();
+    let group_items = match group_resp {
+        Some(Ok(v)) => parse_approval_rows(&v),
+        Some(Err(SncfrError::AclForbidden { .. })) => {
+            warnings.push(
+                "Group-linked approvals could not be read (403); showing approvals assigned to you only."
+                    .to_string(),
+            );
+            Vec::new()
+        }
+        Some(Err(e)) => return Err(e),
+        None => Vec::new(),
+    };
+    let items = merge_linked_approvals(user_items, group_items, !args.all_users);
     Ok(ApprovalsEnvelope {
         count: items.len(),
-        query: query_str,
+        query: user_query,
+        group_query,
+        warnings,
         items,
     })
+}
+
+/// Deduplicates by `sys_id`, newest first, recording `linked_by` (APR-1).
+fn merge_linked_approvals(
+    user: Vec<ApprovalItem>,
+    group: Vec<ApprovalItem>,
+    mark: bool,
+) -> Vec<ApprovalItem> {
+    let mut out: Vec<ApprovalItem> = Vec::new();
+    for (mut item, how) in user
+        .into_iter()
+        .map(|i| (i, "user"))
+        .chain(group.into_iter().map(|i| (i, "group")))
+    {
+        if let Some(seen) = out.iter_mut().find(|o| o.sys_id == item.sys_id) {
+            if mark && seen.linked_by.as_deref() != Some(how) {
+                seen.linked_by = Some("both".to_string());
+            }
+            continue;
+        }
+        if mark {
+            item.linked_by = Some(how.to_string());
+        }
+        out.push(item);
+    }
+    out.sort_by(|a, b| b.created_on.cmp(&a.created_on));
+    out
 }
 
 /// Executes `sncfr approvals show <approval_or_ticket>`.
@@ -196,6 +276,8 @@ pub async fn execute_approvals_show(
     Ok(ApprovalsEnvelope {
         count: items.len(),
         query: query_str,
+        group_query: None,
+        warnings: Vec::new(),
         items,
     })
 }
@@ -238,14 +320,18 @@ pub async fn execute_approval_action(
             None,
         ),
     )];
-    if let Some(comments) = &args.comments {
+    if let Some(typed) = &args.comments {
+        // SAFE-8: approval comments carry the agent marker too. There is no `--allow-code-tag`
+        // on approvals, so `[code]` is refused here.
+        let (comments, source) = crate::mutate::marked_journal(typed, false)?;
+        let comments = &comments;
         diffs.push(FieldDiff {
             field: "comments".to_string(),
             before_display: target.comments.clone(),
             before_value: target.comments.clone(),
             after_display: comments.clone(),
             after_value: comments.clone(),
-            source: Some("input".to_string()),
+            source: Some(source.to_string()),
             status: Some("n/a (free text)".to_string()),
             ..Default::default()
         });
@@ -317,6 +403,7 @@ fn parse_approval_rows(resp: &Value) -> Vec<ApprovalItem> {
                 approver_sys_id: extract_field_value(row, "approver"),
                 group: extract_field_display(row, "group"),
                 group_assignment_group: extract_field_value(row, "group.assignment_group"),
+                linked_by: None,
             });
         }
     }
@@ -597,13 +684,25 @@ pub fn format_approvals(env: &ApprovalsEnvelope, format: ResolvedOutputFormat) -
         ResolvedOutputFormat::Yaml => serde_yaml::to_string(env).unwrap_or_default(),
         ResolvedOutputFormat::Md => {
             let mut out = format!("# Approvals ({} records)\n\n", env.count);
-            out.push_str("| Approval sys_id | Target Ticket | Approver | State | Updated |\n");
-            out.push_str("| :--- | :--- | :--- | :--- | :--- |\n");
+            out.push_str(
+                "| Approval sys_id | Target Ticket | Approver | Group | Linked by | State | Updated |\n",
+            );
+            out.push_str("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n");
+            let cell = crate::untrusted::inline;
             for item in &env.items {
                 out.push_str(&format!(
-                    "| `{}` | `{}` | {} | `{}` | {} |\n",
-                    item.sys_id, item.target_ticket, item.approver, item.state, item.updated_on
+                    "| `{}` | `{}` | {} | {} | {} | `{}` | {} |\n",
+                    item.sys_id,
+                    cell(&item.target_ticket),
+                    cell(&item.approver),
+                    cell(item.group.as_deref().unwrap_or("")),
+                    item.linked_by.as_deref().unwrap_or(""),
+                    cell(&item.state),
+                    cell(&item.updated_on)
                 ));
+            }
+            for w in &env.warnings {
+                out.push_str(&format!("\n⚠ {w}\n"));
             }
             out
         }
@@ -621,19 +720,28 @@ pub fn format_approvals(env: &ApprovalsEnvelope, format: ResolvedOutputFormat) -
                     "APPROVAL_SYS_ID",
                     "TARGET_TICKET",
                     "APPROVER",
+                    "GROUP",
+                    "LINKED_BY",
                     "STATE",
                     "UPDATED_ON",
                 ]);
+            let cell = |s: &str| Cell::new(crate::untrusted::clean(s).replace('\n', " ⏎ "));
             for item in &env.items {
                 table.add_row(vec![
                     Cell::new(&item.sys_id),
-                    Cell::new(&item.target_ticket),
-                    Cell::new(&item.approver),
+                    cell(&item.target_ticket),
+                    cell(&item.approver),
+                    cell(item.group.as_deref().unwrap_or("")),
+                    Cell::new(item.linked_by.as_deref().unwrap_or("")),
                     styled_table_cell("state", &item.state),
-                    Cell::new(&item.updated_on),
+                    cell(&item.updated_on),
                 ]);
             }
-            table.to_string()
+            let mut out = table.to_string();
+            for w in &env.warnings {
+                out.push_str(&format!("\n⚠ {w}"));
+            }
+            out
         }
     }
 }
