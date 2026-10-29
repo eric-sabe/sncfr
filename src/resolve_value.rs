@@ -1348,6 +1348,7 @@ values = [
                 max_length: None,
                 reference_table: None,
                 is_custom: false,
+                display: false,
             },
         );
         let ctx = ResolveCtx {

@@ -67,7 +67,7 @@ pub async fn load_or_sync_table_schema_with(
                 ("sysparm_display_value", "all"),
                 (
                     "sysparm_fields",
-                    "name,element,column_label,internal_type,mandatory,max_length,reference",
+                    "name,element,column_label,internal_type,mandatory,max_length,reference,display",
                 ),
                 ("sysparm_limit", "500"),
             ],
@@ -109,6 +109,8 @@ pub async fn load_or_sync_table_schema_with(
                         extract_field_value(row, "max_length").and_then(|s| s.parse::<u32>().ok());
                     let reference_table = extract_field_value(row, "reference");
                     let is_custom = element.starts_with("u_") || element.starts_with("x_");
+                    let display = extract_field_value(row, "display")
+                        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
 
                     let meta = CachedFieldMeta {
                         label,
@@ -117,6 +119,7 @@ pub async fn load_or_sync_table_schema_with(
                         max_length,
                         reference_table,
                         is_custom,
+                        display,
                     };
 
                     if row_table == table {
@@ -197,6 +200,7 @@ pub async fn load_or_sync_table_schema_with(
                         max_length: None,
                         reference_table: link_table,
                         is_custom: k.starts_with("u_") || k.starts_with("x_"),
+                        display: false,
                     },
                 );
             }
