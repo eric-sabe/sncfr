@@ -1,0 +1,15 @@
+{
+  "item": {
+    "sys_id": { "value": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0", "display_value": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0" },
+    "name": { "value": "Example Laptop", "display_value": "Example Laptop" },
+    "short_description": { "value": "A standard Example Corp laptop", "display_value": "A standard Example Corp laptop" }
+  },
+  "variables": [
+    { "sys_id": { "value": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1" }, "name": { "value": "model" }, "question_text": { "value": "Model", "display_value": "Model" }, "type": { "value": "5" }, "mandatory": { "value": "true" }, "order": { "value": "200" } },
+    { "sys_id": { "value": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2" }, "name": { "value": "cost_center" }, "question_text": { "value": "Cost center", "display_value": "Cost center" }, "type": { "value": "6" }, "mandatory": { "value": "false" }, "order": { "value": "100" } }
+  ],
+  "choices": [
+    { "question": { "value": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1" }, "value": { "value": "standard" }, "text": { "value": "Standard", "display_value": "Standard" }, "order": { "value": "1" } },
+    { "question": { "value": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1" }, "value": { "value": "power" }, "text": { "value": "Power user", "display_value": "Power user" }, "order": { "value": "2" } }
+  ]
+}
