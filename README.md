@@ -144,6 +144,7 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 | `catalog search`/`show` without the catalog API role | fell back on any error (search) / failed (show) | Table API fallback marked `source: table_api_fallback`. Session errors are no longer swallowed |
 | `catalog order` without the catalog API role | API error | exit `4` with the portal link, nothing sent |
 | `catalog order --var` | sent as typed | choice values checked (non-match exit `2`), references resolved, unknown names `UNVERIFIABLE (unknown_field)` (exit `8`) |
+| `catalog order --write` result | the request only | the request plus its requested items (`items[]`), polled up to `--poll-timeout` (default 20 s); a timeout only warns |
 | `--priority low` where `sys_choice` is unreadable but stats show the values in use | `UNVERIFIABLE (no_metadata)` | verified against the in-use set, or `UNVERIFIABLE (not_seen` / `ootb_unconfirmed)` with the in-use values listed |
 
 ---
