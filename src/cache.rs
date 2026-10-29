@@ -99,6 +99,9 @@ pub struct CachedFieldMeta {
     /// True if field starts with `u_` or `x_`.
     #[serde(default)]
     pub is_custom: bool,
+    /// The table's display field (`sys_dictionary.display = true`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub display: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
