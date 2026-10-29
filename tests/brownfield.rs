@@ -1224,3 +1224,49 @@ async fn cmdb_lookup_answers_an_ip_and_flags_an_ambiguous_hostname() {
         "read-only (NA-1)"
     );
 }
+
+#[tokio::test]
+async fn recipes_list_and_run_read_only_steps() {
+    // CT-30c (WF-2, WF-3; NA-1, NA-10)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::Cmdb).await;
+    let listed = corp.run(&["--json", "recipe", "list"]);
+    assert_eq!(listed.code, 0, "{}", listed.stderr);
+    let names: Vec<String> = listed
+        .json()
+        .as_array()
+        .expect("recipes")
+        .iter()
+        .map(|r| r["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(names, vec!["ci-open-incidents", "queue-by-priority"]);
+
+    let out = corp.run(&[
+        "--json",
+        "recipe",
+        "run",
+        "ci-open-incidents",
+        "--param",
+        "host=web-01",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let o = out.json();
+    assert_eq!(
+        o["steps"][1]["query"],
+        "ci_item=f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1^task.active=true"
+    );
+    assert_eq!(o["steps"][1]["rows"][0]["task.number"], "INC0012345");
+
+    let bad = corp.run(&[
+        "recipe",
+        "run",
+        "ci-open-incidents",
+        "--param",
+        "host=x^NQactive=true",
+    ]);
+    assert_eq!(bad.code, 2, "{}", bad.stderr);
+    assert!(
+        corp.mutating_requests().await.is_empty(),
+        "read-only (NA-1)"
+    );
+}
