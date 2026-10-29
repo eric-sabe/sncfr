@@ -273,10 +273,27 @@ fn api_variables(res: &Value) -> Vec<CatalogVariableSpec> {
                     .or_else(|| t.as_str().map(str::to_string))
             })
             .unwrap_or_default();
+        // `type` may be the numeric code or a friendly name.
+        let by_name = match field_type.as_str() {
+            "choice"
+            | "select_box"
+            | "multiple_choice"
+            | "lookup_select_box"
+            | "lookup_multiple_choice" => Some(VariableKind::Choice(Vec::new())),
+            "reference" => Some(VariableKind::Reference {
+                table: None,
+                list: false,
+            }),
+            "list_collector" => Some(VariableKind::Reference {
+                table: None,
+                list: true,
+            }),
+            _ => None,
+        };
         let kind = if !pairs.is_empty() {
             VariableKind::Choice(pairs.clone())
         } else {
-            match variable_type(&numeric).1 {
+            match by_name.unwrap_or_else(|| variable_type(&numeric).1) {
                 VariableKind::Reference { table, list } => VariableKind::Reference {
                     table: v
                         .get("reference")
@@ -497,6 +514,137 @@ pub async fn execute_catalog_show(
     show_from_tables(client, &item_sys_id).await
 }
 
+/// Resolves one `--var name=value` (CAT-4): choice sets are complete (non-match is exit 2),
+/// references resolve like `--assign-to` / `--group`, free text is sent as typed, an unknown
+/// name is `unknown_field`, and unreadable metadata is `no_metadata`.
+async fn resolve_variable(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    detail: &CatalogItemDetail,
+    name: &str,
+    input: &str,
+) -> Result<ResolvedValue, SncfrError> {
+    use crate::resolve_value::{UnverifiableReason, unverifiable_catalog_value};
+    if !detail.variables_readable {
+        return Ok(unverifiable_catalog_value(
+            input,
+            UnverifiableReason::NoMetadata,
+        ));
+    }
+    let Some(spec) = detail.variables.iter().find(|v| v.name == name) else {
+        return Ok(unverifiable_catalog_value(
+            input,
+            UnverifiableReason::UnknownField,
+        ));
+    };
+    match &spec.kind {
+        VariableKind::FreeText => Ok(ResolvedValue::text(input)),
+        VariableKind::Choice(pairs) => {
+            crate::resolve_value::resolve_catalog_choice(name, input, pairs)
+        }
+        VariableKind::Reference { table, list } => {
+            let Some(table) = table
+                .as_deref()
+                .filter(|t| crate::untrusted::is_table_name(t))
+            else {
+                return Ok(unverifiable_catalog_value(
+                    input,
+                    UnverifiableReason::NoMetadata,
+                ));
+            };
+            let parts: Vec<&str> = if *list {
+                input
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            } else {
+                vec![input.trim()]
+            };
+            let mut ids = Vec::new();
+            let mut labels = Vec::new();
+            for part in parts {
+                match resolve_reference_value(client, cache, table, part).await? {
+                    Some((id, label)) => {
+                        ids.push(id);
+                        labels.push(label);
+                    }
+                    None => {
+                        return Ok(unverifiable_catalog_value(
+                            input,
+                            UnverifiableReason::NoMetadata,
+                        ));
+                    }
+                }
+            }
+            Ok(ResolvedValue::verified(
+                ids.join(","),
+                Some(labels.join(", ")),
+                None,
+            ))
+        }
+    }
+}
+
+/// One reference value: a sys_id as given, users and groups through [`crate::references`]
+/// (never guessing), other tables by exact `name`. `None` when it cannot be confirmed.
+async fn resolve_reference_value(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    table: &str,
+    input: &str,
+) -> Result<Option<(String, String)>, SncfrError> {
+    if is_sys_id(input) {
+        return Ok(Some((input.to_string(), input.to_string())));
+    }
+    match table {
+        "sys_user" => {
+            let m = crate::references::resolve_user(client, cache, input).await?;
+            Ok(Some((m.sys_id, m.name)))
+        }
+        "sys_user_group" => {
+            let m = crate::references::resolve_group(client, cache, input).await?;
+            Ok(Some((m.sys_id, m.name)))
+        }
+        _ => {
+            let q = format!("name={}", crate::untrusted::query_value(input)?);
+            let Ok(resp) = client
+                .get_json::<Value>(
+                    &format!("/api/now/table/{table}"),
+                    &[
+                        ("sysparm_query", q.as_str()),
+                        ("sysparm_fields", "sys_id,name"),
+                        ("sysparm_limit", "2"),
+                    ],
+                )
+                .await
+            else {
+                return Ok(None);
+            };
+            let rows = resp
+                .get("result")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            match rows.as_slice() {
+                [one] => Ok(extract_field_value(one, "sys_id")
+                    .map(|id| (id, extract_field_display(one, "name").unwrap_or_default()))),
+                [] => Ok(None),
+                _ => Err(SncfrError::AmbiguousReference {
+                    kind: table.to_string(),
+                    input: input.to_string(),
+                    detail: format!("more than one {table} record is named exactly this"),
+                    candidates: rows
+                        .iter()
+                        .filter_map(|r| extract_field_display(r, "name"))
+                        .collect(),
+                    suggestion: None,
+                }),
+            }
+        }
+    }
+}
+
 /// Executes `sncfr catalog order <item_sys_id> [--var k=v...] [--write]`.
 pub async fn execute_catalog_order(
     client: ReadOnlyClient,
@@ -526,21 +674,16 @@ pub async fn execute_catalog_order(
     let mut variables: Vec<ResolvedField> = Vec::new();
     let mut diffs = Vec::new();
 
-    // Variable values are checked against the item's metadata in CAT-4; until then they are sent
-    // as typed.
+    // CAT-4: every `--var` goes through the SAFE chain against the item's metadata.
     for kv in &args.variables {
         let (k, v) = parse_key_value_pair(kv)?;
-        diffs.push(FieldDiff {
-            field: format!("var:{k}"),
-            before_display: None,
-            before_value: None,
-            after_display: v.clone(),
-            after_value: v.clone(),
-            source: Some("input".to_string()),
-            status: Some("n/a (free text)".to_string()),
-            ..Default::default()
-        });
-        let value = ResolvedValue::text(&v);
+        let value = resolve_variable(&client, cache, &detail, &k, &v).await?;
+        diffs.push(FieldDiff::from_resolved(
+            &format!("var:{k}"),
+            None,
+            &v,
+            &value,
+        ));
         variables.push((k, v, value));
     }
 
@@ -693,5 +836,93 @@ pub fn format_catalog_detail(detail: &CatalogItemDetail, format: ResolvedOutputF
             }
             out
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::ClientAuth;
+    use tempfile::tempdir;
+    use url::Url;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ITEM: &str = "fedcba9876543210fedcba9876543211";
+
+    fn order(vars: &[&str]) -> CatalogOrderArgs {
+        CatalogOrderArgs {
+            item_sys_id: ITEM.to_string(),
+            variables: vars.iter().map(|v| (*v).to_string()).collect(),
+            quantity: 1,
+            requested_for: None,
+            write: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_variables_go_through_the_safe_chain() {
+        // CT-62b (CAT-4)
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/sn_sc/servicecatalog/items/{ITEM}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": {
+                    "sys_id": ITEM,
+                    "name": "Example Laptop",
+                    "variables": [
+                        { "name": "model", "label": "Model", "type": "choice", "mandatory": true,
+                          "choices": [ { "label": "Standard", "value": "standard" },
+                                       { "label": "Power user", "value": "power" } ] },
+                        { "name": "notes", "label": "Notes", "type": "string" }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+
+        let bad = execute_catalog_order(client.clone(), &cache, &order(&["model=gold"]), None)
+            .await
+            .unwrap_err();
+        assert_eq!(bad.code().exit_code(), 2, "not in the choice set");
+
+        let unknown = execute_catalog_order(
+            client.clone(),
+            &cache,
+            &order(&["model=standard", "colour=red"]),
+            None,
+        )
+        .await
+        .expect("dry-run");
+        assert_eq!(unknown.unverifiable_fields.len(), 1);
+        assert_eq!(unknown.unverifiable_fields[0].field, "var:colour");
+        assert_eq!(unknown.unverifiable_fields[0].reason, "unknown_field");
+
+        let ok = execute_catalog_order(
+            client,
+            &cache,
+            &order(&["model=Power user", "notes=anything goes"]),
+            None,
+        )
+        .await
+        .expect("dry-run");
+        assert!(ok.unverifiable_fields.is_empty());
+        let model = ok
+            .diffs
+            .iter()
+            .find(|d| d.field == "var:model")
+            .expect("model");
+        assert_eq!(model.after_value, "power");
+        assert_eq!(model.source.as_deref(), Some("sys_choice"));
     }
 }

@@ -573,6 +573,51 @@ pub fn resolve_choice(
     ))
 }
 
+/// CAT-4: a select-box / multiple-choice / lookup-select `--var` against its choice set (a
+/// complete set: a non-match is exit 2). An empty set means the choices were unreadable, which is
+/// `no_metadata`.
+pub fn resolve_catalog_choice(
+    name: &str,
+    input: &str,
+    choices: &[(String, String)],
+) -> Result<ResolvedValue, SncfrError> {
+    let input = input.trim();
+    if choices.is_empty() {
+        return Ok(ResolvedValue::unverified(
+            input,
+            UnverifiableReason::NoMetadata,
+            Vec::new(),
+        ));
+    }
+    let mut hits: Vec<(String, String)> = Vec::new();
+    for (v, l) in choices {
+        if (v == input || l.eq_ignore_ascii_case(input)) && !hits.iter().any(|(hv, _)| hv == v) {
+            hits.push((v.clone(), l.clone()));
+        }
+    }
+    match hits.as_slice() {
+        [(v, l)] => Ok(ResolvedValue::verified(
+            v.clone(),
+            Some(l.clone()),
+            Some(ValueSource::SysChoice),
+        )),
+        [] => Err(SncfrError::Validation {
+            message: format!("'{input}' is not a choice of catalog variable '{name}'"),
+            valid_choices: valid_choices(choices, suggestion(input, choices).as_deref()),
+            remediation: Some(format!(
+                "Use one of the listed values (`--var {name}=<value>`)."
+            )),
+        }),
+        many => Err(ambiguous(&format!("var:{name}"), input, many)),
+    }
+}
+
+/// CAT-4: a `--var` value that cannot be checked (`unknown_field` for a name the item does not
+/// define, `no_metadata` when the item's variables are unreadable).
+pub fn unverifiable_catalog_value(input: &str, reason: UnverifiableReason) -> ResolvedValue {
+    ResolvedValue::unverified(input, reason, Vec::new())
+}
+
 /// Resolves a value for any field: typing first, then the choice chain for choice fields.
 /// Reference fields are resolved by their dedicated flags; a raw sys_id passes, anything else is
 /// `NoMetadata` here (reference lookups by name happen in `references`).
