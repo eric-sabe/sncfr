@@ -18,6 +18,7 @@ pub mod output;
 pub mod pack;
 pub mod policy;
 pub mod query;
+pub mod recipe;
 pub mod references;
 pub mod resolve;
 pub mod resolve_value;

@@ -296,6 +296,14 @@ async fn main() -> ExitCode {
                 }
             };
         }
+        Commands::Recipe(sncfr::cli::RecipeCommands::List) => {
+            let recipes = sncfr::recipe::list(sncfr::pack::active());
+            println!(
+                "{}",
+                sncfr::recipe::format_recipe_list(&recipes, resolved_output)
+            );
+            return ExitCode::SUCCESS;
+        }
         Commands::Skill(subcmd) => match subcmd {
             SkillCommands::Print => {
                 print!(
@@ -522,6 +530,20 @@ async fn execute_authenticated_command(
                 emit_mutation(&report, resolved_output)
             }
         },
+        Commands::Recipe(sncfr::cli::RecipeCommands::Run { name, params }) => {
+            let pack = sncfr::pack::active();
+            let recipe = pack
+                .recipes
+                .get(name)
+                .map(|r| r.value.clone())
+                .ok_or_else(|| SncfrError::InvalidArgs {
+                    message: format!("no recipe named '{}'", sncfr::untrusted::inline(name)),
+                    remediation: Some("Run `sncfr recipe list`.".to_string()),
+                })?;
+            let params = sncfr::recipe::parse_params(&recipe, params)?;
+            let out = sncfr::recipe::run(name, &recipe, &params, &client, &cache).await?;
+            Ok(sncfr::recipe::format_recipe_output(&out, resolved_output))
+        }
         Commands::Cmdb(sncfr::cli::CmdbCommands::Lookup { input }) => {
             let lookup = sncfr::cmdb::execute_cmdb_lookup(&client, input).await?;
             Ok(sncfr::cmdb::format_cmdb_lookup(&lookup, resolved_output))
@@ -540,7 +562,10 @@ async fn execute_authenticated_command(
                 emit_mutation(&report, resolved_output)
             }
         },
-        Commands::Auth(_) | Commands::Skill(_) | Commands::Pack(_) => unreachable!(),
+        Commands::Auth(_)
+        | Commands::Skill(_)
+        | Commands::Pack(_)
+        | Commands::Recipe(sncfr::cli::RecipeCommands::List) => unreachable!(),
     }
 }
 
