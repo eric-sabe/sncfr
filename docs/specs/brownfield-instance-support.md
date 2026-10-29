@@ -874,7 +874,12 @@ Exactly one → target. Zero → exit 5 listing the non-actionable approvals wit
 - It rejects (exit 2 `INVALID_QUERY_VALUE`) `^`, CR, LF, NUL, and case-insensitive `javascript:`. Values bound for `IN` lists are also rejected when they contain `,` (callers switch to `^OR` chains).
 - `sys_idIN` operands must match `^[0-9a-f]{32}$`, otherwise they are shown as "(unresolved)".
 - Table names entering a path (from packs, recipes, `item_option_new.reference`, `sys_number`, `link` URLs) must match `^[a-z0-9_]{1,80}$`.
-- `QueryBuilder` becomes internal to `TableQuery` (introduced in 2.2 as the single read builder; P4 adds its default parameters). `TableQuery::raw()` is reserved for pack `open_rule`/`closed_rule`/`custom` fragments that already passed PACK-5 validation, and for the user's own `--query` / `--from-url`.
+- **Implementation (2.2).** The guard sits at two choke points instead of a separate `TableQuery` type:
+  - every `EncodedQuery` value method checks its value and `compile_list_filters` / `search` call `validate()`;
+  - the few hand-formatted lookups (user, group, ticket number) call `query_value` directly;
+  - `ReadOnlyClient::endpoint_url`, which every request (read or mutating) goes through, applies the table-name rule and the origin assert.
+
+  P4 adds the default read parameters at the same client choke point. `EncodedQuery::raw()` is reserved for pack `open_rule`/`closed_rule`/`custom` fragments that already passed PACK-5 validation, and for the user's own `--query` / `--from-url`.
 - `endpoint_url` rejects any joined URL whose origin ≠ the `base_url` origin.
 
 ### Capability record (CAP-1, 2, 4, 6)
@@ -1239,7 +1244,7 @@ Any assertion change is a BF-TEST-3 violation.
 | CT-09b | Row 9 (pack conflict) | exit 8 `pack_conflict`; `doctor` lists the drift | `tests/brownfield.rs` |
 | CT-10 | `--set u_tier=gold --write`, no pack, dictionary `[]`, sample shows `u_tier` with display = value | exit 8 `unknown_field_type`, zero PATCH (NA-2, BF-TEST-2b) | `tests/brownfield.rs` |
 | CT-10b | Same with the Example Corp pack, stats returns `silver`, `bronze` | exit 8 `not_seen`, candidates listed, zero PATCH | `tests/brownfield.rs` |
-| CT-10c | `update --set u_tier=gold --attach f --write`, unverifiable | exit 8, zero PATCH, zero POST `/attachment` (NA-2) | `tests/brownfield.rs` |
+| CT-10c | A multi-request command with one unverifiable value | exit 8, zero requests of any kind (NA-2). `update` has no `--attach`, so in 0.2.0 this is exercised by `catalog order --fill-ritm` (CT-40b); `MutatingClient::authorize` takes every mutation of an invocation at once | `tests/brownfield.rs` |
 | CT-11 | CT-10 + `--allow-unverified u_tier` | one PATCH with `u_tier=gold`; output echoes `allowed_unverified` | `tests/brownfield.rs` |
 | CT-11b | `--allow-unverified '*'` | exit 2 | `src/write_gate.rs` |
 | CT-12 | Read-only lock + unverifiable | exit 6 (precedence) | `src/write_gate.rs` |

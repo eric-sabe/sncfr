@@ -125,6 +125,31 @@ async fn main() -> ExitCode {
         }
     }
 
+    match sncfr::write_gate::AllowList::parse(&cli.allow_unverified) {
+        Ok(list) => {
+            sncfr::write_gate::install_allow_list(list);
+        }
+        Err(err) => {
+            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+            return err.exit_code();
+        }
+    }
+
+    // A pack describes specific instances: writes elsewhere are refused, reads get a warning (NA-14).
+    if let Some(prof) = &resolved_profile
+        && !sncfr::pack::active().binds(&prof.instance_key)
+    {
+        let err = SncfrError::PackNotForInstance {
+            pack: sncfr::pack::active().name.clone(),
+            instance: prof.instance_key.clone(),
+        };
+        if cli.command.requests_write() {
+            eprintln!("{}", format_error(&err, output_format, is_stderr_tty));
+            return err.exit_code();
+        }
+        eprintln!("warning: {err}");
+    }
+
     let (resolved_output, write_permit) =
         match validate_invocation(&cli, resolved_profile.as_ref(), is_stdout_tty) {
             Ok(res) => res,
@@ -318,6 +343,22 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Renders a mutation report. When the report implies exit 8 (unverifiable values) or 9 (fields
+/// not applied), the report still goes to stdout and the error envelope to stderr.
+fn emit_mutation(
+    report: &sncfr::mutate::MutationReport,
+    format: ResolvedOutputFormat,
+) -> Result<String, SncfrError> {
+    let rendered = format_mutation_report(report, format);
+    match sncfr::mutate::report_error(report) {
+        Some(err) => {
+            println!("{rendered}");
+            Err(err)
+        }
+        None => Ok(rendered),
+    }
+}
+
 /// Loads `ootb` ⊕ the profile's `pack =` ⊕ `--pack`/`SNCFR_PACK` (ADR-0004).
 fn load_instance_pack(
     cli: &Cli,
@@ -398,23 +439,23 @@ async fn execute_authenticated_command(
         }
         Commands::Comment(args) => {
             let report = execute_comment_or_note(client, &cache, args, false, write_permit).await?;
-            Ok(format_mutation_report(&report, resolved_output))
+            emit_mutation(&report, resolved_output)
         }
         Commands::Note(args) => {
             let report = execute_comment_or_note(client, &cache, args, true, write_permit).await?;
-            Ok(format_mutation_report(&report, resolved_output))
+            emit_mutation(&report, resolved_output)
         }
         Commands::Update(args) => {
             let report = execute_update(client, &cache, args, write_permit).await?;
-            Ok(format_mutation_report(&report, resolved_output))
+            emit_mutation(&report, resolved_output)
         }
         Commands::Create(args) => {
             let report = execute_create(client, &cache, args, write_permit).await?;
-            Ok(format_mutation_report(&report, resolved_output))
+            emit_mutation(&report, resolved_output)
         }
         Commands::Attach(args) => {
             let report = execute_attach(client, &cache, args, write_permit).await?;
-            Ok(format_mutation_report(&report, resolved_output))
+            emit_mutation(&report, resolved_output)
         }
         Commands::Approvals(subcmd) => match subcmd {
             ApprovalCommands::List(args) => {
@@ -428,12 +469,12 @@ async fn execute_authenticated_command(
             ApprovalCommands::Approve(args) => {
                 let report =
                     execute_approval_action(client, &cache, args, true, write_permit).await?;
-                Ok(format_mutation_report(&report, resolved_output))
+                emit_mutation(&report, resolved_output)
             }
             ApprovalCommands::Reject(args) => {
                 let report =
                     execute_approval_action(client, &cache, args, false, write_permit).await?;
-                Ok(format_mutation_report(&report, resolved_output))
+                emit_mutation(&report, resolved_output)
             }
         },
         Commands::Catalog(subcmd) => match subcmd {
@@ -447,7 +488,7 @@ async fn execute_authenticated_command(
             }
             CatalogCommands::Order(args) => {
                 let report = execute_catalog_order(client, &cache, args, write_permit).await?;
-                Ok(format_mutation_report(&report, resolved_output))
+                emit_mutation(&report, resolved_output)
             }
         },
         Commands::Auth(_) | Commands::Skill(_) | Commands::Pack(_) => unreachable!(),

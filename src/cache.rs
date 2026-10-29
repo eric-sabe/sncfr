@@ -75,6 +75,10 @@ pub struct CachedTableSchema {
     pub fields: BTreeMap<String, CachedFieldMeta>,
     #[serde(default)]
     pub choices: BTreeMap<String, Vec<CachedChoice>>,
+    /// Set when this schema came from `schemas/<table>.json` rather than a live fetch, so
+    /// previews can report `cache` vs `sys_choice` (SAFE-2). Never persisted.
+    #[serde(skip)]
+    pub loaded_from_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +316,7 @@ mod tests {
             super_class: Some("task".to_string()),
             fields: BTreeMap::new(),
             choices: BTreeMap::new(),
+            loaded_from_cache: false,
         };
         schema.choices.insert(
             "state".to_string(),

@@ -1,19 +1,19 @@
 use crate::auth::resolve_current_identity;
 use crate::cache::{CachedIdentity, InstanceCache};
 use crate::cli::{ApprovalActionArgs, ApprovalListArgs, CatalogOrderArgs};
-use crate::client::{
-    ReadOnlyClient, WritePermit, extract_field_display, extract_field_pair, extract_field_value,
-};
+use crate::client::write_gate::{ResolvedField, Target, VerifiedMutation};
+use crate::client::{ReadOnlyClient, WritePermit, extract_field_display, extract_field_value};
 use crate::error::SncfrError;
 use crate::mutate::{
-    FieldDiff, MutationReport, parse_key_value_pair, resolve_user_reference, shell_quote,
+    FieldDiff, MutationReport, parse_key_value_pair, resolve_user_reference, run_gate, shell_quote,
 };
 use crate::output::{ResolvedOutputFormat, styled_table_cell};
 use crate::query::{DYNAMIC_ME_SYS_ID, EncodedQuery};
 use crate::resolve::{is_sys_id, resolve_ticket};
+use crate::resolve_value::ResolvedValue;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalItem {
@@ -222,13 +222,18 @@ pub async fn execute_approval_action(
         before_value: Some(target.state.to_ascii_lowercase()),
         after_display: new_state_disp.to_string(),
         after_value: new_state_val.to_string(),
+        ..Default::default()
     }];
 
-    let mut payload = Map::new();
-    payload.insert(
+    let mut fields: Vec<ResolvedField> = vec![(
         "state".to_string(),
-        Value::String(new_state_val.to_string()),
-    );
+        new_state_val.to_string(),
+        ResolvedValue::verified(
+            new_state_val.to_string(),
+            Some(new_state_disp.to_string()),
+            None,
+        ),
+    )];
     if let Some(comments) = &args.comments {
         diffs.push(FieldDiff {
             field: "comments".to_string(),
@@ -236,8 +241,15 @@ pub async fn execute_approval_action(
             before_value: target.comments.clone(),
             after_display: comments.clone(),
             after_value: comments.clone(),
+            source: Some("input".to_string()),
+            status: Some("n/a (free text)".to_string()),
+            ..Default::default()
         });
-        payload.insert("comments".to_string(), Value::String(comments.clone()));
+        fields.push((
+            "comments".to_string(),
+            comments.clone(),
+            ResolvedValue::text(comments),
+        ));
     }
 
     let base_url = client.base_url().as_str().trim_end_matches('/').to_string();
@@ -246,49 +258,35 @@ pub async fn execute_approval_action(
         target.sys_id
     );
 
-    if let Some(write_permit) = permit {
-        let mutating = client.into_mutating(write_permit);
-        let path = format!("/api/now/table/sysapproval_approver/{}", target.sys_id);
-        let _: Value = mutating
-            .patch_json(&path, &[("sysparm_display_value", "all")], &payload)
-            .await?;
-
-        Ok(MutationReport {
-            mode: "committed".to_string(),
-            operation: op_name.to_string(),
-            ticket: Some(target.target_ticket),
-            table: "sysapproval_approver".to_string(),
-            sys_id: Some(target.sys_id),
-            ui_url: Some(ui_url),
-            diffs,
-            attachments: vec![],
-            commit_command: None,
-        })
-    } else {
-        let mut cmd_parts = vec![
-            "sncfr".to_string(),
-            "approvals".to_string(),
-            op_name.to_string(),
-            shell_quote(&target.sys_id),
-        ];
-        if let Some(comments) = &args.comments {
-            cmd_parts.push("--comments".to_string());
-            cmd_parts.push(shell_quote(comments));
-        }
-        cmd_parts.push("--write".to_string());
-
-        Ok(MutationReport {
-            mode: "dry_run".to_string(),
-            operation: op_name.to_string(),
-            ticket: Some(target.target_ticket),
-            table: "sysapproval_approver".to_string(),
-            sys_id: Some(target.sys_id.clone()),
-            ui_url: Some(ui_url),
-            diffs,
-            attachments: vec![],
-            commit_command: Some(cmd_parts.join(" ")),
-        })
+    let mut cmd_parts = vec![
+        "sncfr".to_string(),
+        "approvals".to_string(),
+        op_name.to_string(),
+        shell_quote(&target.sys_id),
+    ];
+    if let Some(comments) = &args.comments {
+        cmd_parts.push("--comments".to_string());
+        cmd_parts.push(shell_quote(comments));
     }
+    cmd_parts.push("--write".to_string());
+
+    let mutation = VerifiedMutation::record(
+        Target::patch_record("sysapproval_approver", &target.sys_id)?,
+        &fields,
+    );
+    let gate = run_gate(client, permit, vec![mutation]).await?;
+    let mut report = MutationReport {
+        operation: op_name.to_string(),
+        ticket: Some(target.target_ticket),
+        table: "sysapproval_approver".to_string(),
+        sys_id: Some(target.sys_id.clone()),
+        ui_url: Some(ui_url),
+        diffs,
+        commit_command: Some(cmd_parts.join(" ")),
+        ..Default::default()
+    };
+    gate.fill(&mut report);
+    Ok(report)
 }
 
 /// Selects the single approval `approvals approve|reject` may act on (APR-4).
@@ -524,9 +522,11 @@ pub async fn execute_catalog_order(
     permit: Option<WritePermit>,
 ) -> Result<MutationReport, SncfrError> {
     let detail = execute_catalog_show(&client, &args.item_sys_id).await?;
-    let mut vars_map = Map::new();
+    let mut variables: Vec<ResolvedField> = Vec::new();
     let mut diffs = Vec::new();
 
+    // Variable values are checked against the item's metadata in CAT-4; until then they are sent
+    // as typed.
     for kv in &args.variables {
         let (k, v) = parse_key_value_pair(kv)?;
         diffs.push(FieldDiff {
@@ -535,14 +535,18 @@ pub async fn execute_catalog_order(
             before_value: None,
             after_display: v.clone(),
             after_value: v.clone(),
+            source: Some("input".to_string()),
+            status: Some("n/a (free text)".to_string()),
+            ..Default::default()
         });
-        vars_map.insert(k, Value::String(v));
+        let value = ResolvedValue::text(&v);
+        variables.push((k, v, value));
     }
 
     // Validate mandatory variables
     for var_spec in &detail.variables {
         if var_spec.mandatory
-            && !vars_map.contains_key(&var_spec.name)
+            && !variables.iter().any(|(name, _, _)| name == &var_spec.name)
             && var_spec.default_value.is_none()
         {
             return Err(SncfrError::Validation {
@@ -561,7 +565,6 @@ pub async fn execute_catalog_order(
 
     let mut order_payload = json!({
         "sysparm_quantity": args.quantity.to_string(),
-        "variables": vars_map,
     });
 
     if let Some(req_for) = &args.requested_for {
@@ -572,68 +575,57 @@ pub async fn execute_catalog_order(
             before_value: None,
             after_display: disp,
             after_value: user_sys_id.clone(),
+            source: Some("user".to_string()),
+            status: Some("verified".to_string()),
+            ..Default::default()
         });
         order_payload["sysparm_requested_for"] = Value::String(user_sys_id);
     }
 
-    if let Some(write_permit) = permit {
-        let mutating = client.into_mutating(write_permit);
-        let path = format!(
-            "/api/sn_sc/servicecatalog/items/{}/order_now",
-            detail.sys_id
-        );
-        let resp: Value = mutating.post_json(&path, &[], &order_payload).await?;
-        let res = resp.get("result").unwrap_or(&resp);
-        let req_number = extract_field_display(res, "request_number")
-            .or_else(|| extract_field_display(res, "number"));
-        let req_sys_id =
-            extract_field_value(res, "request_id").or_else(|| extract_field_value(res, "sys_id"));
-
-        Ok(MutationReport {
-            mode: "committed".to_string(),
-            operation: "catalog_order".to_string(),
-            ticket: req_number,
-            table: "sc_request".to_string(),
-            sys_id: req_sys_id,
-            ui_url: None,
-            diffs,
-            attachments: vec![],
-            commit_command: None,
-        })
-    } else {
-        let _ = extract_field_pair;
-        let mut cmd_parts = vec![
-            "sncfr".to_string(),
-            "catalog".to_string(),
-            "order".to_string(),
-            shell_quote(&detail.sys_id),
-        ];
-        for kv in &args.variables {
-            cmd_parts.push("--var".to_string());
-            cmd_parts.push(shell_quote(kv));
-        }
-        if args.quantity != 1 {
-            cmd_parts.push("--quantity".to_string());
-            cmd_parts.push(args.quantity.to_string());
-        }
-        if let Some(req_for) = &args.requested_for {
-            cmd_parts.push("--requested-for".to_string());
-            cmd_parts.push(shell_quote(req_for));
-        }
-        cmd_parts.push("--write".to_string());
-
-        Ok(MutationReport {
-            mode: "dry_run".to_string(),
-            operation: "catalog_order".to_string(),
-            ticket: Some(detail.name),
-            table: "sc_cat_item".to_string(),
-            sys_id: Some(detail.sys_id.clone()),
-            ui_url: None,
-            diffs,
-            attachments: vec![],
-            commit_command: Some(cmd_parts.join(" ")),
-        })
+    let mut cmd_parts = vec![
+        "sncfr".to_string(),
+        "catalog".to_string(),
+        "order".to_string(),
+        shell_quote(&detail.sys_id),
+    ];
+    for kv in &args.variables {
+        cmd_parts.push("--var".to_string());
+        cmd_parts.push(shell_quote(kv));
     }
+    if args.quantity != 1 {
+        cmd_parts.push("--quantity".to_string());
+        cmd_parts.push(args.quantity.to_string());
+    }
+    if let Some(req_for) = &args.requested_for {
+        cmd_parts.push("--requested-for".to_string());
+        cmd_parts.push(shell_quote(req_for));
+    }
+    cmd_parts.push("--write".to_string());
+
+    let mutation = VerifiedMutation::catalog_order(
+        Target::catalog_order(&detail.sys_id)?,
+        order_payload,
+        &variables,
+    );
+    let gate = run_gate(client, permit, vec![mutation]).await?;
+    let mut report = MutationReport {
+        operation: "catalog_order".to_string(),
+        ticket: Some(detail.name.clone()),
+        table: "sc_cat_item".to_string(),
+        sys_id: Some(detail.sys_id.clone()),
+        diffs,
+        commit_command: Some(cmd_parts.join(" ")),
+        ..Default::default()
+    };
+    if let Some(res) = gate.first_record() {
+        report.ticket = extract_field_display(res, "request_number")
+            .or_else(|| extract_field_display(res, "number"));
+        report.table = "sc_request".to_string();
+        report.sys_id =
+            extract_field_value(res, "request_id").or_else(|| extract_field_value(res, "sys_id"));
+    }
+    gate.fill(&mut report);
+    Ok(report)
 }
 
 pub fn format_approvals(env: &ApprovalsEnvelope, format: ResolvedOutputFormat) -> String {

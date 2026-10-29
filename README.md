@@ -116,6 +116,13 @@ Changes in 0.2.0 that existing users and agents will notice are listed here as t
 
 | Situation | 0.1.x | 0.2.0 |
 |---|---|---|
+| A filter or lookup value contains `^`, a line break, or `javascript:` (e.g. `--group "x^ORname=y"`) | interpolated into the query | exit `2` `INVALID_QUERY_VALUE`, nothing sent (`--query` is still sent as written) |
+| Untrusted text in a dry-run preview | printed as-is | control characters and terminal escapes removed; Markdown cells escaped |
+| `--priority low` on an OOTB, readable instance | exit `2` (no label "low") | exit `0`, value `4`, source `ootb` (alias confirmed by the instance) |
+| A choice value or `--set` field that can't be checked (no readable choices, unknown field, unknown type) | sent as typed | exit `8` `UNVERIFIABLE`, nothing written; `--allow-unverified <field>` sends it as typed |
+| Dry-run containing such a field | exit `0` | exit `8` (preview still printed) |
+| A field the instance silently ignored on write | reported as committed | exit `9` `WRITE_NOT_APPLIED` with `not_applied` |
+| `--write` with a pack whose `instances` excludes this instance | n/a | exit `2` `PACK_NOT_FOR_INSTANCE` |
 
 ---
 

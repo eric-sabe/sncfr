@@ -14,9 +14,12 @@ pub mod output;
 pub mod pack;
 pub mod query;
 pub mod resolve;
+pub mod resolve_value;
 pub mod schema;
 pub mod skill;
+pub mod untrusted;
 pub mod workflows;
+pub use client::write_gate;
 
 use crate::cli::Cli;
 use crate::client::WritePermit;

@@ -559,13 +559,28 @@ impl ReadOnlyClient {
         })
     }
 
+    /// Joins `path` onto the instance URL. Every request goes through here, so this is where
+    /// table names are checked and requests are pinned to the instance's origin (NA-13): a path
+    /// can never send the session's cookies or tokens to another host.
     fn endpoint_url(&self, path: &str) -> Result<Url, SncfrError> {
-        self.base_url
+        crate::untrusted::check_api_path(path)?;
+        let url = self
+            .base_url
             .join(path)
             .map_err(|e| SncfrError::InvalidArgs {
                 message: format!("Invalid endpoint path '{path}': {e}"),
                 remediation: None,
-            })
+            })?;
+        if url.origin() != self.base_url.origin() {
+            return Err(SncfrError::InvalidArgs {
+                message: format!(
+                    "Refusing to send a request outside the instance origin ({})",
+                    self.base_url.origin().ascii_serialization()
+                ),
+                remediation: None,
+            });
+        }
+        Ok(url)
     }
 
     fn map_reqwest_error(&self, err: reqwest::Error) -> SncfrError {
@@ -671,6 +686,10 @@ impl ReadOnlyClient {
 ///
 /// Can only be constructed by presenting a [`WritePermit`]. Exposes `POST`, `PATCH`, and
 /// attachment upload operations. Intentionally exposes **no `DELETE` operations**.
+/// The write gate (`src/write_gate.rs`): the only public way to send a mutating request.
+#[path = "write_gate.rs"]
+pub mod write_gate;
+
 #[derive(Debug)]
 pub struct MutatingClient {
     read_only: ReadOnlyClient,
@@ -692,7 +711,7 @@ impl MutatingClient {
     }
 
     /// Sends an authenticated `POST` request with a JSON payload (e.g., creating a ticket or catalog order).
-    pub async fn post_json<B: Serialize, T: DeserializeOwned>(
+    async fn post_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
@@ -711,7 +730,7 @@ impl MutatingClient {
     }
 
     /// Sends an authenticated `PATCH` request with a JSON payload (e.g., updating ticket fields, comments, or work notes).
-    pub async fn patch_json<B: Serialize, T: DeserializeOwned>(
+    async fn patch_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
@@ -730,7 +749,7 @@ impl MutatingClient {
     }
 
     /// Uploads a binary attachment to a ticket record via `POST /api/now/attachment/file`.
-    pub async fn upload_attachment<T: DeserializeOwned>(
+    async fn upload_attachment<T: DeserializeOwned>(
         &self,
         table_name: &str,
         table_sys_id: &str,
@@ -1091,5 +1110,37 @@ mod tests {
             .await
             .expect("upload_attachment");
         assert_eq!(uploaded["result"]["file_name"], "crash.log");
+    }
+
+    #[tokio::test]
+    async fn refuses_paths_that_leave_the_instance_origin() {
+        // CT-70 (NA-13): no path can carry the session to another host.
+        let server = MockServer::start().await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        for path in [
+            "https://evil.example/api/now/table/incident",
+            "//evil.example/api/now/table/incident",
+            "/api/now/table/../../sys_user",
+        ] {
+            let err = client
+                .get_json::<serde_json::Value>(path, &[])
+                .await
+                .unwrap_err();
+            assert_eq!(err.code().exit_code(), 2, "{path}");
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 }

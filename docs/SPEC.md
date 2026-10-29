@@ -80,8 +80,18 @@ When a mutating command (`comment`, `note`, `update`, `create`, `attach`, `appro
 3. Outputs a structured **Dry-Run Preview**:
    - Target ticket number, table, `sys_id`, and URL.
    - Before $\to$ After field diff (showing both human display values and underlying internal values).
+   - For every field, a **Source** (`pack`, `ootb`, `cache`, `sys_choice`, `discovered`, `input`, or `none`) and a **Status** (`verified`, `verified (in-use set)`, `UNVERIFIABLE (<reason>)`, or `n/a (free text)`). JSON carries the same as `diffs[].source` / `diffs[].status`, plus `diffs[].unverifiable` (`would_send`, `reason`, `candidates`, `suggested`).
    - Exact command with `--write` to commit the change.
-4. Exits cleanly without mutating the instance.
+4. Exits cleanly without mutating the instance (exit `0`), or exits `8` (`UNVERIFIABLE`) when any value could not be confirmed. Dry-run and `--write` run the same check: every mutation of an invocation is checked before the first request is sent, so `--write` with an unverifiable value sends nothing.
+5. **Write path**: mutations are built only from resolved values and sent only through the write gate (`src/write_gate.rs`; ADR-0002 amendment). After each record write, the returned record is compared with what was sent (exit `9` on a mismatch).
+
+**Value resolution (SAFE-1)**: every field is first typed (choice, reference, free text, plain, unknown type, or unknown field). Choice values then go through this chain:
+1. an authoritative user-pack choice set (complete: a non-match is exit `2`; a contradiction with readable instance metadata is `pack_conflict`; values from a `draft` pack are `draft_pack`);
+2. the instance's complete set (cached or live `sys_choice`), where `confirm_required` aliases (the bundled `ootb` ones) apply only when the instance has the same `(value, label)`;
+3. an in-use set discovered via the Aggregate API;
+4. nothing, which gives `UNVERIFIABLE (no_metadata)`.
+
+Fields whose type or existence cannot be established are `UNVERIFIABLE`, never treated as free text. When `sys_dictionary` is forbidden or returns no rows, fields are inferred from one sample record. Full rules and the normative outcome table: [`docs/specs/brownfield-instance-support.md`](specs/brownfield-instance-support.md) §Field typing and value resolution.
 
 ---
 
@@ -98,6 +108,7 @@ All subcommands accept the following global flags:
 - `--read-only` (env `SNCFR_READ_ONLY`): Enforce hard read-only lock for the invocation (rejects `--write` with exit code `6`).
 - `--verbose` (`-v`, env `SNCFR_VERBOSE`): Enable verbose timestamped diagnostic logging to `stderr` (covering profile resolution, browser discovery, CDP session probing, Keychain storage, and HTTP request/response status).
 - `--log-file <path>` (env `SNCFR_LOG_FILE`): Append structured timestamped debug logs to `<path>`.
+- `--allow-unverified <field,...>`: Send the named `UNVERIFIABLE` fields exactly as typed (§4.2, §6.2). Explicit names only (no `*`/`all`; catalog variables as `var:<name>`), never set by env or profile; only on explicit user instruction.
 - `--pack <path>` (env `SNCFR_PACK`): Instance Pack layered over the profile's `pack =` for this invocation (§7.3). Rejected (exit `2`) on a profile with `pack_locked = true`.
 
 ### 5.1 Ticket Prefix Auto-Resolution
@@ -186,12 +197,15 @@ Commands that accept a `<TICKET>` identifier accept any ticket number (case-inse
 | Exit Code | Error Code | Meaning & Agent Remediation |
 | :--- | :--- | :--- |
 | `0` | `OK` / `DRY_RUN_OK` | Command succeeded (or dry-run validated cleanly). |
-| `2` | `INVALID_ARGS` / `VALIDATION_ERROR` | CLI flag error, invalid choice value, or unresolved user/group reference (includes valid choices in error output). |
+| `2` | `INVALID_ARGS` / `VALIDATION_ERROR` / `INVALID_QUERY_VALUE` / `PACK_INVALID` | CLI flag error, invalid choice value, or unresolved user/group reference (includes valid choices in error output). `INVALID_QUERY_VALUE`: a value would add, remove, or reorder encoded-query terms (`^`, line breaks, `javascript:`, or `,` inside an `IN` list); request paths are also restricted to plain table names on the instance origin. `PACK_INVALID`: an Instance Pack failed to parse or validate (§7.3). |
 | `3` | `AUTH_EXPIRED` / `AUTH_REQUIRED` | Session missing or expired. Remediation: run `sncfr auth login`. |
 | `4` | `ACL_FORBIDDEN` | Authenticated user lacks ServiceNow permissions for the target resource. |
 | `5` | `NOT_FOUND` | Ticket number or record `sys_id` does not exist (or is hidden by query business rules/ACLs). |
 | `6` | `READ_ONLY_LOCKED` | `--write` was attempted while `SNCFR_READ_ONLY=1` or profile `read_only = true` is active. |
 | `7` | `NETWORK_OR_INSTANCE_ERROR` | TLS, timeout, rate-limit (`429`), or instance `5xx` error. |
+| `8` | `UNVERIFIABLE` | One or more values could not be confirmed against an active pack or instance metadata (§4.2). **Nothing was written.** The preview still prints to stdout; the error envelope lists `unverifiable_fields[{field, input, would_send, reason, candidates, suggested}]`. Agents: show the user `would_send` and candidates, prefer re-running with a candidate value, and use `--allow-unverified <fields>` only when the user explicitly confirms the literal value. |
+| `9` | `WRITE_NOT_APPLIED` | The instance accepted the write but returned some fields with a different value than sent (unknown field, field-level write ACL, business rule). The record **was** partly updated; `not_applied[{field, sent, returned}]`. Do not retry; report to the user. Fields absent from the response are listed as `unconfirmed` and do not change the exit code. |
+| `2` | `PACK_NOT_FOR_INSTANCE` | `--write` against an instance the merged Instance Pack does not list in `instances` (reads print a warning). |
 
 ---
 

@@ -24,18 +24,33 @@ pub enum ErrorCode {
     NetworkOrInstanceError,
     /// Exit code 2: An Instance Pack failed to parse or validate (ADR-0004).
     PackInvalid,
+    /// Exit code 2: A value would change the structure of an encoded query (NA-13).
+    InvalidQueryValue,
+    /// Exit code 2: The merged Instance Pack does not list this instance (NA-14).
+    PackNotForInstance,
+    /// Exit code 8: A value could not be confirmed against a pack or instance metadata; nothing
+    /// was written (SAFE-3).
+    Unverifiable,
+    /// Exit code 9: The instance accepted a write but did not apply some fields (NA-17).
+    WriteNotApplied,
 }
 
 impl ErrorCode {
     /// Deterministic exit code per `docs/SPEC.md` Section 6.2.
     pub const fn exit_code(self) -> u8 {
         match self {
-            Self::InvalidArgs | Self::ValidationError | Self::PackInvalid => 2,
+            Self::InvalidArgs
+            | Self::ValidationError
+            | Self::PackInvalid
+            | Self::InvalidQueryValue
+            | Self::PackNotForInstance => 2,
             Self::AuthExpired | Self::AuthRequired => 3,
             Self::AclForbidden => 4,
             Self::NotFound => 5,
             Self::ReadOnlyLocked => 6,
             Self::NetworkOrInstanceError => 7,
+            Self::Unverifiable => 8,
+            Self::WriteNotApplied => 9,
         }
     }
 
@@ -51,6 +66,10 @@ impl ErrorCode {
             Self::ReadOnlyLocked => "READ_ONLY_LOCKED",
             Self::NetworkOrInstanceError => "NETWORK_OR_INSTANCE_ERROR",
             Self::PackInvalid => "PACK_INVALID",
+            Self::InvalidQueryValue => "INVALID_QUERY_VALUE",
+            Self::PackNotForInstance => "PACK_NOT_FOR_INSTANCE",
+            Self::Unverifiable => "UNVERIFIABLE",
+            Self::WriteNotApplied => "WRITE_NOT_APPLIED",
         }
     }
 }
@@ -98,6 +117,29 @@ pub enum SncfrError {
     #[error("Mutation blocked: profile or environment is locked to read-only mode ({reason})")]
     ReadOnlyLocked { reason: String },
 
+    #[error(
+        "Not written: {} field(s) could not be verified ({})",
+        .fields.len(),
+        .fields.iter().map(|f| f.field.as_str()).collect::<Vec<_>>().join(", ")
+    )]
+    Unverifiable {
+        fields: Vec<crate::client::write_gate::UnverifiableField>,
+    },
+
+    #[error(
+        "The record was partly updated: the instance did not apply {}",
+        .not_applied.iter().map(|f| f.field.as_str()).collect::<Vec<_>>().join(", ")
+    )]
+    WriteNotApplied {
+        not_applied: Vec<crate::client::write_gate::NotApplied>,
+    },
+
+    #[error("Instance Pack '{pack}' does not list instance '{instance}' (`instances = [...]`)")]
+    PackNotForInstance { pack: String, instance: String },
+
+    #[error("Value '{value}' cannot be used in a ServiceNow query: {reason}")]
+    InvalidQueryValue { value: String, reason: String },
+
     #[error("Invalid Instance Pack '{pack}':\n  {}", .problems.join("\n  "))]
     PackInvalid { pack: String, problems: Vec<String> },
 
@@ -124,6 +166,10 @@ pub struct ErrorDetail {
     pub remediation: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub valid_choices: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unverifiable_fields: Vec<crate::client::write_gate::UnverifiableField>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_applied: Vec<crate::client::write_gate::NotApplied>,
 }
 
 impl SncfrError {
@@ -139,6 +185,10 @@ impl SncfrError {
             Self::ReadOnlyLocked { .. } => ErrorCode::ReadOnlyLocked,
             Self::NetworkOrInstance { .. } => ErrorCode::NetworkOrInstanceError,
             Self::PackInvalid { .. } => ErrorCode::PackInvalid,
+            Self::InvalidQueryValue { .. } => ErrorCode::InvalidQueryValue,
+            Self::Unverifiable { .. } => ErrorCode::Unverifiable,
+            Self::WriteNotApplied { .. } => ErrorCode::WriteNotApplied,
+            Self::PackNotForInstance { .. } => ErrorCode::PackNotForInstance,
         }
     }
 
@@ -170,6 +220,18 @@ impl SncfrError {
                     .to_string(),
             ),
             Self::NetworkOrInstance { remediation, .. } => remediation.clone(),
+            Self::Unverifiable { .. } => Some(
+                "Show the user each field's would_send value and candidates. Prefer re-running with a candidate value; pass `--allow-unverified <fields>` only when the user explicitly confirms the literal value.".to_string(),
+            ),
+            Self::WriteNotApplied { .. } => Some(
+                "Do not retry. Report the not_applied fields to the user and check the record with `sncfr show`.".to_string(),
+            ),
+            Self::PackNotForInstance { .. } => Some(
+                "Use the pack written for this instance, or add the host to the pack's `instances` after checking its facts apply.".to_string(),
+            ),
+            Self::InvalidQueryValue { .. } => Some(
+                "Pass the plain value only (no `^`, line breaks, or `javascript:`). For complex filters use `--query`, which is sent as you write it.".to_string(),
+            ),
             Self::PackInvalid { pack, .. } => Some(format!(
                 "Fix the listed problems, then check with `sncfr pack validate {pack}`."
             )),
@@ -190,6 +252,14 @@ impl SncfrError {
                 message: self.to_string(),
                 remediation: self.remediation(),
                 valid_choices,
+                unverifiable_fields: match self {
+                    Self::Unverifiable { fields } => fields.clone(),
+                    _ => Vec::new(),
+                },
+                not_applied: match self {
+                    Self::WriteNotApplied { not_applied } => not_applied.clone(),
+                    _ => Vec::new(),
+                },
             },
         }
     }
