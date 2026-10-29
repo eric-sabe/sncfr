@@ -87,21 +87,6 @@ fn shape_of(input: &str) -> InputShape {
     }
 }
 
-/// `active=true^stateNOT IN6,7` → `task.active=true^task.stateNOT IN6,7` (each term, `^OR`
-/// included). Clauses like `^NQ` are rejected by `pack validate`, so none reach here.
-pub fn prefix_terms(query: &str, prefix: &str) -> String {
-    query
-        .split('^')
-        .filter(|t| !t.is_empty())
-        .map(|t| match t.strip_prefix("OR") {
-            Some(rest) => format!("OR{prefix}{rest}"),
-            None if t.starts_with("ORDERBY") => t.to_string(),
-            None => format!("{prefix}{t}"),
-        })
-        .collect::<Vec<_>>()
-        .join("^")
-}
-
 /// The open rule for tasks related to a CI (Q-2): the pack's `open_rule.task`, else
 /// `active=true`, prefixed for `task_ci`.
 fn task_open_rule(pack: &crate::pack::MergedPack) -> String {
@@ -109,7 +94,7 @@ fn task_open_rule(pack: &crate::pack::MergedPack) -> String {
         .open_rules
         .get("task")
         .map_or_else(|| "active=true".to_string(), |r| r.value.query.clone());
-    prefix_terms(&rule, "task.")
+    crate::query::prefix_terms(&rule, "task.")
 }
 
 fn row_fields(row: &Value, fields: &[String]) -> BTreeMap<String, String> {
@@ -387,7 +372,7 @@ mod tests {
         assert_eq!(shape_of("web-01.example.com"), InputShape::Fqdn);
         assert_eq!(shape_of("web-01"), InputShape::Name);
         assert_eq!(
-            prefix_terms("active=true^stateNOT IN6,7^ORpriority=1", "task."),
+            crate::query::prefix_terms("active=true^stateNOT IN6,7^ORpriority=1", "task."),
             "task.active=true^task.stateNOT IN6,7^ORtask.priority=1"
         );
     }

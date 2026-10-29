@@ -117,6 +117,12 @@ pub enum Scenario {
     /// A small CMDB: `cmdb_ci_server` answers `ip_address=10.0.0.5` with web-01 and the hostname
     /// query for `web` with two servers; web-01 has one parent relationship and one open task.
     Cmdb,
+    /// Triage reads: `task` answers one open INC (caller `sam.caller`, idle since 2026-10-01),
+    /// the journal shows the caller replied after Pat's last note, and `task_sla` is 403.
+    TriageTables,
+    /// Every table triage reads answers 403 (`task`, `task_sla`, `incident`,
+    /// `sysapproval_approver`); identity still resolves.
+    TriageForbidden,
     /// `task` answers with recent rows (`number`, `sys_class_name`): three `ABC-` rows on
     /// `u_abc_request`, two `INC` rows (`task_sample.json`).
     TaskSample,
@@ -487,6 +493,45 @@ impl ExampleCorp {
                     "task.state": { "value": "2", "display_value": "In Progress" },
                     "task.sys_updated_on": { "value": "2026-10-22 10:00:00", "display_value": "2026-10-22 10:00:00" }
                 }]})).await;
+            }
+            Scenario::TriageTables => {
+                self.get("task", json!({ "result": [{
+                    "sys_id": { "value": INCIDENT_SYS_ID, "display_value": INCIDENT_SYS_ID },
+                    "number": { "value": "INC0012345", "display_value": "INC0012345" },
+                    "sys_class_name": { "value": "incident", "display_value": "Incident" },
+                    "short_description": { "value": "VPN drops for the Example Corp branch", "display_value": "VPN drops for the Example Corp branch" },
+                    "priority": { "value": "3", "display_value": "3 - Moderate" },
+                    "sys_created_on": { "value": "2026-09-20 10:00:00", "display_value": "2026-09-20 10:00:00" },
+                    "sys_updated_on": { "value": "2026-10-01 10:00:00", "display_value": "2026-10-01 10:00:00" },
+                    "assigned_to": { "value": ME_SYS_ID, "display_value": "Pat Example" },
+                    "assignment_group": { "value": "33333333333333333333333333333333", "display_value": "Network - L2" },
+                    "caller_id.user_name": { "value": "sam.caller", "display_value": "sam.caller" }
+                }]})).await;
+                self.get("sys_journal_field", json!({ "result": [
+                    { "element_id": { "value": INCIDENT_SYS_ID }, "element": { "value": "comments" }, "sys_created_on": { "value": "2026-10-27 09:00:00" }, "sys_created_by": { "value": "sam.caller" } },
+                    { "element_id": { "value": INCIDENT_SYS_ID }, "element": { "value": "work_notes" }, "sys_created_on": { "value": "2026-10-26 09:00:00" }, "sys_created_by": { "value": "pat.example" } }
+                ]})).await;
+                Mock::given(method("GET"))
+                    .and(path("/api/now/table/task_sla"))
+                    .respond_with(
+                        ResponseTemplate::new(403).set_body_json(
+                            json!({ "error": { "message": "Insufficient rights" } }),
+                        ),
+                    )
+                    .mount(&self.server)
+                    .await;
+            }
+            Scenario::TriageForbidden => {
+                for t in ["task", "task_sla", "incident", "sysapproval_approver"] {
+                    Mock::given(method("GET"))
+                        .and(path(format!("/api/now/table/{t}")))
+                        .respond_with(ResponseTemplate::new(403).set_body_json(
+                            json!({ "error": { "message": "Insufficient rights" } }),
+                        ))
+                        .with_priority(1)
+                        .mount(&self.server)
+                        .await;
+                }
             }
             Scenario::TaskSample => {
                 self.get("task", fixture("task_sample.json")).await;
