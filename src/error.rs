@@ -37,6 +37,9 @@ pub enum ErrorCode {
     Unverifiable,
     /// Exit code 9: The instance accepted a write but did not apply some fields (NA-17).
     WriteNotApplied,
+    /// Exit code 2: A recipe step that a later step depends on returned no row or an empty field
+    /// (NA-10).
+    RecipeStepEmpty,
 }
 
 impl ErrorCode {
@@ -48,7 +51,8 @@ impl ErrorCode {
             | Self::PackInvalid
             | Self::InvalidQueryValue
             | Self::PackNotForInstance
-            | Self::AmbiguousReference => 2,
+            | Self::AmbiguousReference
+            | Self::RecipeStepEmpty => 2,
             Self::AuthExpired | Self::AuthRequired => 3,
             Self::AclForbidden => 4,
             Self::NotFound => 5,
@@ -77,6 +81,7 @@ impl ErrorCode {
             Self::WriteOutcomeUnknown => "WRITE_OUTCOME_UNKNOWN",
             Self::Unverifiable => "UNVERIFIABLE",
             Self::WriteNotApplied => "WRITE_NOT_APPLIED",
+            Self::RecipeStepEmpty => "RECIPE_STEP_EMPTY",
         }
     }
 }
@@ -160,6 +165,13 @@ pub enum SncfrError {
     )]
     CatalogOrderUnauthorized { state: String, portal_url: String },
 
+    #[error("Recipe '{recipe}': step '{step}' found nothing to pass on ({detail})")]
+    RecipeStepEmpty {
+        recipe: String,
+        step: String,
+        detail: String,
+    },
+
     #[error("Request to '{resource}' timed out after {timeout_secs}s")]
     TimedOut { resource: String, timeout_secs: u64 },
 
@@ -232,6 +244,7 @@ impl SncfrError {
             Self::WriteNotApplied { .. } => ErrorCode::WriteNotApplied,
             Self::PackNotForInstance { .. } => ErrorCode::PackNotForInstance,
             Self::AmbiguousReference { .. } => ErrorCode::AmbiguousReference,
+            Self::RecipeStepEmpty { .. } => ErrorCode::RecipeStepEmpty,
             Self::RateLimited { .. } | Self::TimedOut { .. } => ErrorCode::NetworkOrInstanceError,
             Self::ApiFamilyUnauthorized { .. } | Self::CatalogOrderUnauthorized { .. } => {
                 ErrorCode::AclForbidden
@@ -294,6 +307,9 @@ impl SncfrError {
                 Some(s) => format!("Suggestion (not applied): {s}. Re-run with the exact {kind} name from the candidates, or its sys_id."),
                 None => format!("Re-run with the exact {kind} name from the candidates, or its sys_id."),
             }),
+            Self::RecipeStepEmpty { .. } => Some(
+                "Check the parameters (`sncfr recipe list` shows them); a later step needs exactly one row from this one.".to_string(),
+            ),
             Self::PackNotForInstance { .. } => Some(
                 "Use the pack written for this instance, or add the host to the pack's `instances` after checking its facts apply.".to_string(),
             ),

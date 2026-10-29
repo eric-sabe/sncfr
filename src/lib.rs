@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod catalog;
 pub mod cli;
 pub mod client;
+pub mod cmdb;
 pub mod config;
 pub mod discover;
 pub mod doctor;
