@@ -1103,3 +1103,83 @@ async fn catalog_order_has_no_fallback_and_sends_nothing() {
         .collect();
     assert!(posts.is_empty(), "zero POST of any kind");
 }
+
+#[tokio::test]
+async fn fill_ritm_is_checked_with_the_order_and_bound_to_its_own_ritm() {
+    // CT-40, CT-40b (CAT-3; NA-2)
+    let corp = ExampleCorp::start().await;
+    corp.mount(support::Scenario::CatalogOrderable).await;
+    let dry = corp.run(&[
+        "--json",
+        "catalog",
+        "order",
+        CATALOG_ITEM,
+        "--var",
+        "cost_center=CC-900",
+        "--fill-ritm",
+    ]);
+    assert_eq!(
+        dry.code, 8,
+        "u_cost_center is unknown on a dictionary-less instance: {}",
+        dry.stderr
+    );
+    let report = dry.json();
+    assert_eq!(
+        report["fill_ritm"]["target"],
+        "<RITM created by this order>"
+    );
+    assert_eq!(report["fill_ritm"]["diffs"][0]["field"], "u_cost_center");
+    assert_eq!(report["fill_ritm"]["diffs"][0]["after_value"], "CC-900");
+
+    let blocked = corp.run(&[
+        "catalog",
+        "order",
+        CATALOG_ITEM,
+        "--var",
+        "cost_center=CC-900",
+        "--fill-ritm",
+        "--write",
+    ]);
+    assert_eq!(blocked.code, 8, "{}", blocked.stderr);
+    assert!(
+        corp.mutating_requests().await.is_empty(),
+        "zero POST to order_now, zero PATCH"
+    );
+
+    let committed = corp.run(&[
+        "--json",
+        "catalog",
+        "order",
+        CATALOG_ITEM,
+        "--var",
+        "cost_center=CC-900",
+        "--fill-ritm",
+        "--allow-unverified",
+        "u_cost_center",
+        "--write",
+    ]);
+    assert_eq!(committed.code, 0, "{}", committed.stderr);
+    let report = committed.json();
+    assert_eq!(report["fill_ritm"]["target"], "RITM0050001");
+    let warnings = report["warnings"].to_string();
+    assert!(
+        warnings.contains("RITM0050002 is for another catalog item"),
+        "{warnings}"
+    );
+    let bodies = corp.patch_bodies().await;
+    assert_eq!(
+        bodies,
+        vec![serde_json::json!({ "u_cost_center": "CC-900" })]
+    );
+    let patched: Vec<String> = corp
+        .requests()
+        .await
+        .into_iter()
+        .filter(|r| r.method.as_str() == "PATCH")
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert_eq!(
+        patched,
+        vec!["/api/now/table/sc_req_item/e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"]
+    );
+}

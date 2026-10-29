@@ -10,8 +10,8 @@ use crate::client::write_gate::{ResolvedField, Target, VerifiedMutation};
 use crate::client::{ReadOnlyClient, WritePermit, extract_field_display, extract_field_value};
 use crate::error::SncfrError;
 use crate::mutate::{
-    FieldDiff, MutationReport, OrderedItem, parse_key_value_pair, resolve_user_reference, run_gate,
-    shell_quote,
+    Binding, FieldDiff, FollowUpBlock, MutationReport, OrderedItem, parse_key_value_pair,
+    resolve_user_reference, run_gate_staged, shell_quote,
 };
 use crate::output::ResolvedOutputFormat;
 use crate::resolve::is_sys_id;
@@ -852,8 +852,56 @@ pub async fn execute_catalog_order(
         order_payload,
         &variables,
     );
+    // CAT-3: the post-order fill, checked with the order before anything is sent.
+    let fill = if args.fill_ritm {
+        Some(plan_fill(&client, cache, &variables).await?)
+    } else {
+        None
+    };
+    if fill.is_some() {
+        cmd_parts.insert(cmd_parts.len() - 1, "--fill-ritm".to_string());
+    }
+    let mut mutations = vec![mutation];
+    if let Some((_, fill_fields)) = &fill {
+        mutations.push(VerifiedMutation::record(
+            Target::deferred_patch("sc_req_item")?,
+            fill_fields,
+        ));
+    }
+
     let reader = client.clone();
-    let gate = run_gate(client, permit, vec![mutation]).await?;
+    let policy = PollPolicy::resolve(crate::pack::active(), args.poll_timeout);
+    let item_sys_id = detail.sys_id.clone();
+    let fill_cmd_set: Vec<String> = fill
+        .iter()
+        .flat_map(|(_, f)| {
+            f.iter()
+                .map(|(k, _, v)| format!("--set {}", shell_quote(&format!("{k}={}", v.value()))))
+        })
+        .collect();
+    let wants_fill = fill.is_some();
+    let gate = run_gate_staged(client, permit, mutations, |first| {
+        let req = first
+            .map(|o| o.response.get("result").unwrap_or(&o.response))
+            .and_then(|r| {
+                extract_field_value(r, "request_id").or_else(|| extract_field_value(r, "sys_id"))
+            })
+            .unwrap_or_default();
+        async move {
+            // CAT-2: wait for the requested items.
+            let (items, warning) = poll_requested_items(&reader, &req, policy).await;
+            let mut binding = Binding {
+                sys_id: None,
+                warnings: warning.into_iter().collect(),
+                items,
+            };
+            if wants_fill {
+                bind_fill(&mut binding, &item_sys_id, &fill_cmd_set);
+            }
+            binding
+        }
+    })
+    .await?;
     let mut report = MutationReport {
         operation: "catalog_order".to_string(),
         ticket: Some(detail.name.clone()),
@@ -861,6 +909,10 @@ pub async fn execute_catalog_order(
         sys_id: Some(detail.sys_id.clone()),
         diffs,
         commit_command: Some(cmd_parts.join(" ")),
+        fill_ritm: fill.map(|(diffs, _)| FollowUpBlock {
+            target: RITM_PLACEHOLDER.to_string(),
+            diffs,
+        }),
         ..Default::default()
     };
     if let Some(res) = gate.first_record() {
@@ -869,15 +921,124 @@ pub async fn execute_catalog_order(
         report.table = "sc_request".to_string();
         report.sys_id =
             extract_field_value(res, "request_id").or_else(|| extract_field_value(res, "sys_id"));
-        // CAT-2: wait for the requested items.
-        let policy = PollPolicy::resolve(crate::pack::active(), args.poll_timeout);
-        let req = report.sys_id.clone().unwrap_or_default();
-        let (items, warning) = poll_requested_items(&reader, &req, policy).await;
-        report.items = items;
-        report.warnings.extend(warning);
+    }
+    let bound = gate.binding.as_ref().and_then(|b| {
+        let id = b.sys_id.as_ref()?;
+        b.items.iter().find(|i| &i.sys_id == id)
+    });
+    if let (Some(block), Some(item)) = (report.fill_ritm.as_mut(), bound) {
+        block.target.clone_from(&item.number);
     }
     gate.fill(&mut report);
     Ok(report)
+}
+
+/// The fill's target before the order runs.
+const RITM_PLACEHOLDER: &str = "<RITM created by this order>";
+
+/// CAT-3: the pack's `catalog.post_order_fill.fields`, with `{var.<name>}` replaced by the
+/// order's resolved variable values, each resolved for `sc_req_item` through the SAFE chain.
+async fn plan_fill(
+    client: &ReadOnlyClient,
+    cache: &InstanceCache,
+    variables: &[ResolvedField],
+) -> Result<(Vec<FieldDiff>, Vec<ResolvedField>), SncfrError> {
+    let pack = crate::pack::active();
+    let templates = pack
+        .catalog
+        .post_order_fill
+        .as_ref()
+        .map(|f| f.fields.clone())
+        .unwrap_or_default();
+    if templates.is_empty() {
+        return Err(SncfrError::InvalidArgs {
+            message: "--fill-ritm needs `catalog.post_order_fill.fields` in the Instance Pack"
+                .to_string(),
+            remediation: Some("Add the fields to the pack, or drop --fill-ritm.".to_string()),
+        });
+    }
+    let schema =
+        crate::schema::load_or_sync_table_schema(client, cache, "sc_req_item", false).await?;
+    let ctx = crate::resolve_value::ResolveCtx {
+        pack,
+        table: "sc_req_item",
+        schema: &schema,
+        sample: None,
+        discovered: None,
+    };
+    let mut diffs = Vec::new();
+    let mut fields: Vec<ResolvedField> = Vec::new();
+    for (field, template) in &templates {
+        let value = render_fill_template(template, variables)?;
+        let resolved = crate::resolve_value::resolve_field(&ctx, field, &value)?;
+        diffs.push(FieldDiff::from_resolved(field, None, &value, &resolved));
+        fields.push((field.clone(), value, resolved));
+    }
+    Ok((diffs, fields))
+}
+
+/// `"{var.cost_center}"` → the order's resolved `cost_center` value. A placeholder naming a
+/// variable the order does not set is exit 2.
+fn render_fill_template(template: &str, variables: &[ResolvedField]) -> Result<String, SncfrError> {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{var.") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 5..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let name = &after[..end];
+        let Some((_, _, v)) = variables.iter().find(|(n, _, _)| n == name) else {
+            return Err(SncfrError::InvalidArgs {
+                message: format!(
+                    "the post-order fill uses `{{var.{name}}}`, but the order sets no `{name}`"
+                ),
+                remediation: Some(format!("Pass `--var {name}=<value>`, or drop --fill-ritm.")),
+            });
+        };
+        out.push_str(v.value());
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Picks the one RITM the fill may write (`cat_item` = the ordered item). RITMs of other items
+/// are skipped with a warning; none or several leave the fill unsent, with the exact command.
+fn bind_fill(binding: &mut Binding, item_sys_id: &str, set_args: &[String]) {
+    let (mine, others): (Vec<&OrderedItem>, Vec<&OrderedItem>) = binding
+        .items
+        .iter()
+        .partition(|i| i.cat_item == item_sys_id);
+    let mut warnings: Vec<String> = others
+        .iter()
+        .map(|o| {
+            format!(
+                "{} is for another catalog item; the fill skipped it.",
+                o.number
+            )
+        })
+        .collect();
+    let command = |ritm: &str| format!("sncfr update {ritm} {} --write", set_args.join(" "));
+    match mine.as_slice() {
+        [one] => binding.sys_id = Some(one.sys_id.clone()),
+        [] => warnings.push(format!(
+            "The fill was not sent: no requested item for this order appeared. When it does, run: {}",
+            command("<RITM>")
+        )),
+        many => {
+            for m in many {
+                warnings.push(format!(
+                    "The fill was not sent: this order created several requested items. For {}, run: {}",
+                    m.number,
+                    command(&m.number)
+                ));
+            }
+        }
+    }
+    binding.warnings.extend(warnings);
 }
 
 pub fn format_catalog_search(items: &[CatalogItemSummary], format: ResolvedOutputFormat) -> String {
@@ -965,6 +1126,7 @@ mod tests {
             requested_for: None,
             write: false,
             poll_timeout: None,
+            fill_ritm: false,
         }
     }
 
@@ -1110,5 +1272,189 @@ mod tests {
             (500, 4, 20)
         );
         assert_eq!(PollPolicy::resolve(&pack, Some(5)).max_wait.as_secs(), 5);
+    }
+
+    /// A catalog item, an order_now that answers with REQ0000001, and one RITM for the item.
+    async fn order_server(with_order: bool) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/sn_sc/servicecatalog/items/{ITEM}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "sys_id": ITEM, "name": "Example Laptop",
+                    "variables": [ { "name": "cost_center", "label": "Cost center", "type": "string" } ] }
+            })))
+            .mount(&server)
+            .await;
+        for t in ["sys_number", "sys_dictionary", "sys_choice"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/now/table/{t}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": [] })))
+                .mount(&server)
+                .await;
+        }
+        if with_order {
+            Mock::given(method("POST"))
+                .and(path(format!("/api/sn_sc/servicecatalog/items/{ITEM}/order_now")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "result": { "request_number": "REQ0000001", "request_id": "abababababababababababababababab" }
+                })))
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    #[tokio::test]
+    async fn fill_ritm_previews_a_second_block_and_blocks_the_order_when_unverifiable() {
+        // CT-40, CT-40b (CAT-3; NA-2): with the ootb pack there is no fill config, so the pack
+        // is exercised through `plan_fill`'s pure parts and the gate through a blocked fill.
+        let vars: Vec<ResolvedField> = vec![(
+            "cost_center".to_string(),
+            "CC-900".to_string(),
+            ResolvedValue::text("CC-900"),
+        )];
+        assert_eq!(
+            render_fill_template("{var.cost_center}", &vars).unwrap(),
+            "CC-900"
+        );
+        assert_eq!(
+            render_fill_template("cc:{var.cost_center}!", &vars).unwrap(),
+            "cc:CC-900!"
+        );
+        assert_eq!(
+            render_fill_template("{var.nope}", &vars)
+                .unwrap_err()
+                .code()
+                .exit_code(),
+            2
+        );
+
+        let mut binding = Binding {
+            items: vec![
+                OrderedItem {
+                    sys_id: "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1".into(),
+                    number: "RITM1".into(),
+                    cat_item: ITEM.into(),
+                },
+                OrderedItem {
+                    sys_id: "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2".into(),
+                    number: "RITM2".into(),
+                    cat_item: "other".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        bind_fill(
+            &mut binding,
+            ITEM,
+            &["--set 'u_cost_center=CC-900'".to_string()],
+        );
+        assert_eq!(
+            binding.sys_id.as_deref(),
+            Some("e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1")
+        );
+        assert!(binding.warnings[0].contains("RITM2 is for another catalog item"));
+        let mut none = Binding::default();
+        bind_fill(
+            &mut none,
+            ITEM,
+            &["--set 'u_cost_center=CC-900'".to_string()],
+        );
+        assert_eq!(none.sys_id, None);
+        assert!(
+            none.warnings[0].contains("sncfr update <RITM> --set 'u_cost_center=CC-900' --write")
+        );
+
+        // The gate: an unverifiable deferred fill blocks the order itself (zero POST).
+        let server = order_server(true).await;
+        let client = ReadOnlyClient::new(
+            Url::parse(&server.uri()).expect("url"),
+            ClientAuth::ApiKey {
+                header_name: "x-sn-apikey".to_string(),
+                token: "k".to_string(),
+            },
+        )
+        .expect("client");
+        let dir = tempdir().expect("tempdir");
+        let cache = InstanceCache::with_instance_dir(dir.path().to_path_buf());
+        let schema =
+            crate::schema::load_or_sync_table_schema(&client, &cache, "sc_req_item", false)
+                .await
+                .expect("schema");
+        let pack = crate::pack::ootb_merged();
+        let ctx = crate::resolve_value::ResolveCtx {
+            pack: &pack,
+            table: "sc_req_item",
+            schema: &schema,
+            sample: None,
+            discovered: None,
+        };
+        let fill_value =
+            crate::resolve_value::resolve_field(&ctx, "u_cost_center", "CC-900").unwrap();
+        assert!(
+            fill_value.unverifiable().is_some(),
+            "unknown field on a dictionary-less instance"
+        );
+        let order =
+            VerifiedMutation::catalog_order(Target::catalog_order(ITEM).unwrap(), json!({}), &vars);
+        let fill = VerifiedMutation::record(
+            Target::deferred_patch("sc_req_item").unwrap(),
+            &[(
+                "u_cost_center".to_string(),
+                "CC-900".to_string(),
+                fill_value,
+            )],
+        );
+        let permit = crate::client::WritePermit::issue(
+            &<crate::cli::Cli as clap::Parser>::parse_from([
+                "sncfr",
+                "--instance",
+                "x",
+                "catalog",
+                "order",
+                ITEM,
+                "--write",
+            ]),
+            None,
+        )
+        .expect("permit")
+        .expect("write");
+        let gate = crate::mutate::run_gate_staged(
+            client.clone(),
+            Some(permit),
+            vec![order, fill],
+            |_| async { Binding::default() },
+        )
+        .await
+        .expect("gate");
+        assert_eq!(gate.mode, "blocked");
+        assert_eq!(gate.blocking[0].field, "u_cost_center");
+        let posts = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() != "GET")
+            .count();
+        assert_eq!(posts, 0, "zero POST to order_now");
+
+        // Dry-run preview: the second block appears and nothing is written.
+        let report = MutationReport {
+            fill_ritm: Some(FollowUpBlock {
+                target: RITM_PLACEHOLDER.to_string(),
+                diffs: vec![FieldDiff::from_resolved(
+                    "u_cost_center",
+                    None,
+                    "CC-900",
+                    &ResolvedValue::text("CC-900"),
+                )],
+            }),
+            ..Default::default()
+        };
+        let text = crate::mutate::format_mutation_report(&report, ResolvedOutputFormat::Md);
+        assert!(
+            text.contains("Then on <RITM created by this order>"),
+            "{text}"
+        );
     }
 }

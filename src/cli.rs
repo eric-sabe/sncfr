@@ -726,6 +726,11 @@ pub struct CatalogOrderArgs {
     /// `catalog.poll.max_wait_secs`, else 20)
     #[arg(long, value_name = "SECS")]
     pub poll_timeout: Option<u64>,
+
+    /// After the order, also set the pack's `catalog.post_order_fill.fields` on the requested
+    /// item it creates (checked before the order is sent; off by default)
+    #[arg(long)]
+    pub fill_ritm: bool,
 }
 
 #[derive(Debug, Clone, Args)]
